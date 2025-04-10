@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 import numpy as np
 
 # Load configuration
-from config import DATA_DIR, CRYPTOCURRENCIES, DATA_INTERVALS, DEFAULT_INTERVAL
+from src.config import DATA_DIR, CRYPTOCURRENCIES, DATA_INTERVALS, DEFAULT_INTERVAL
 
 # Load environment variables
 load_dotenv()
@@ -190,10 +190,10 @@ async def fetch_and_save_data_async(crypto, start_date, end_date, interval, api_
     topics = [
         # Price data is most critical
         f"cryptoquant|btc/inter-entity-flows/miner-to-miner?from_miner=f2pool&to_miner=all_miner&window=hour",
-        f"cryptoquant|btc/fund-data/market-price-usd?symbol=gbtc&window=day",
-        f"cryptoquant|btc/flow-indicator/exchange-whale-ratio?exchange=binance&window=day",
-        f"cryptoquant|btc/exchange-flows/inflow?exchange=binance&window=day",
-        f"cryptoquant|btc/exchange-flows/outflow?exchange=binance&window=day",
+        f"cryptoquant|btc/fund-data/market-price-usd?symbol=gbtc&window=hour",
+        f"cryptoquant|btc/flow-indicator/exchange-whale-ratio?exchange=binance&window=hour",
+        f"cryptoquant|btc/exchange-flows/inflow?exchange=binance&window=hour",
+        f"cryptoquant|btc/exchange-flows/outflow?exchange=binance&window=hour",
         # Try these as secondary data sources
     ]
     

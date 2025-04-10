@@ -12,7 +12,7 @@ from ta.volatility import BollingerBands, AverageTrueRange
 from ta.volume import OnBalanceVolumeIndicator, VolumePriceTrendIndicator
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
-from config import DATA_DIR, LOOKBACK_WINDOW
+from src.config import DATA_DIR, LOOKBACK_WINDOW
 
 
 class FeatureEngineer:

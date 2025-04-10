@@ -1,17 +1,20 @@
 """
-Hidden Markov Model for identifying market states and generating trading signals.
+Hidden Markov Model for detecting market regimes and generating trading signals.
 """
 
 import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+import seaborn as sns
 from hmmlearn import hmm
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, classification_report
 import joblib
+from datetime import datetime
 
-from config import MODELS_DIR, HMM_STATES, TRADING_FEE
+from src.config import MODELS_DIR, HMM_STATES, TRADING_FEE
 
 
 class MarketHMM:

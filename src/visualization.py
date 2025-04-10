@@ -11,7 +11,7 @@ from matplotlib.ticker import FuncFormatter
 import seaborn as sns
 from datetime import datetime, timedelta
 
-from config import RESULTS_DIR
+from src.config import RESULTS_DIR
 
 # Set styling
 plt.style.use('seaborn-v0_8-darkgrid')
