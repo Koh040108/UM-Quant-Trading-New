@@ -98,6 +98,8 @@ def plot_price_and_states(df, title='BTC Price and HMM States', save_path=None):
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Saved figure to {save_path}")
     
+    plt.show()  # Display the plot
+    
     return fig
 
 
@@ -153,6 +155,8 @@ def plot_trading_signals(df, title='Trading Signals', save_path=None):
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Saved figure to {save_path}")
     
+    plt.show()  # Display the plot
+    
     return fig
 
 
@@ -201,6 +205,8 @@ def plot_performance_metrics(performance, title='Performance Metrics', save_path
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Saved figure to {save_path}")
+    
+    plt.show()  # Display the plot
     
     return fig
 
@@ -258,7 +264,7 @@ def plot_portfolio_growth(results, title='Portfolio Growth', save_path=None):
 
 def create_performance_dashboard(results, performance, crypto='BTC'):
     """
-    Create a comprehensive performance dashboard with both Matplotlib and Plotly visualizations.
+    Create a complete performance dashboard with multiple visualizations.
     
     Args:
         results (pd.DataFrame): DataFrame with trading results
@@ -268,48 +274,122 @@ def create_performance_dashboard(results, performance, crypto='BTC'):
     Returns:
         str: Path to the dashboard directory
     """
-    # Create save directory
+    # Create output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    save_dir = os.path.join(RESULTS_DIR, f"{crypto}_results_{timestamp}")
+    dashboard_dir = os.path.join(RESULTS_DIR, f"{crypto}_dashboard_{timestamp}")
     
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
+    if not os.path.exists(dashboard_dir):
+        os.makedirs(dashboard_dir)
     
-    # Create and save static plots with Matplotlib
-    # Plot price and states
-    if 'hmm_state' in results.columns:
-        state_column = 'hmm_state'
-        # Backward compatibility with 'state' column
-        if 'state' not in results.columns:
-            results['state'] = results[state_column]
+    # Check if we have the required data
+    if results is None or performance is None:
+        print("Warning: Missing data for dashboard creation")
+        # Create a simple HTML file with the warning
+        with open(os.path.join(dashboard_dir, "dashboard_error.html"), "w") as f:
+            f.write("<html><body><h1>Dashboard Error</h1><p>Missing required data for dashboard creation.</p></body></html>")
+        return dashboard_dir
+    
+    try:
+        # Traditional matplotlib visualizations
+        print("Creating traditional matplotlib visualizations...")
+        
+        # Create price and signal chart
+        if 'signal' in results.columns:
+            fig = plot_trading_signals(results, title=f'{crypto} Trading Signals')
+            if fig:
+                plt.figure(fig.number)
+                signals_path = os.path.join(dashboard_dir, f"{crypto}_signals.png")
+                plt.savefig(signals_path, dpi=300, bbox_inches='tight')
+                print(f"  Saved trading signals chart to {signals_path}")
+        
+        # Create portfolio value chart
+        if 'portfolio_value' in results.columns:
+            plt.figure(figsize=(14, 8))
+            plt.plot(results['date'], results['portfolio_value'], 'g-', label='Portfolio Value')
             
-        price_states_path = os.path.join(save_dir, f"{crypto}_price_states.png")
-        plot_price_and_states(results, title=f'{crypto} Price and HMM States', save_path=price_states_path)
+            if 'buy_hold_value' in results.columns:
+                plt.plot(results['date'], results['buy_hold_value'], 'b--', label='Buy & Hold')
+            
+            plt.title(f'{crypto} Portfolio Growth', fontsize=16)
+            plt.xlabel('Date', fontsize=12)
+            plt.ylabel('Value ($)', fontsize=12)
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            portfolio_path = os.path.join(dashboard_dir, f"{crypto}_portfolio.png")
+            plt.savefig(portfolio_path, dpi=300, bbox_inches='tight')
+            print(f"  Saved portfolio chart to {portfolio_path}")
+        
+        # Create HMM state visualization if available
+        if 'hmm_state' in results.columns and 'price' in results.columns:
+            fig = plot_price_and_states(results, title=f'{crypto} Price and HMM States')
+            if fig:
+                plt.figure(fig.number)
+                states_path = os.path.join(dashboard_dir, f"{crypto}_states.png")
+                plt.savefig(states_path, dpi=300, bbox_inches='tight')
+                print(f"  Saved HMM states chart to {states_path}")
+        
+        # Create performance metrics chart
+        if performance:
+            fig = plot_performance_metrics(performance, title=f'{crypto} Performance Metrics')
+            if fig:
+                plt.figure(fig.number)
+                metrics_path = os.path.join(dashboard_dir, f"{crypto}_metrics.png")
+                plt.savefig(metrics_path, dpi=300, bbox_inches='tight')
+                print(f"  Saved performance metrics chart to {metrics_path}")
+    except Exception as e:
+        print(f"Error creating matplotlib visualizations: {str(e)}")
     
-    # Plot trading signals
-    if 'signal' in results.columns:
-        signals_path = os.path.join(save_dir, f"{crypto}_signals.png")
-        plot_trading_signals(results, title=f'{crypto} Trading Signals', save_path=signals_path)
+    try:
+        # Create Plotly interactive visualizations
+        print("Creating interactive Plotly visualizations...")
+        plotly_dir = os.path.join(dashboard_dir, "plotly")
+        
+        if not os.path.exists(plotly_dir):
+            os.makedirs(plotly_dir)
+            
+        # Create price and signals chart
+        try:
+            price_signals_fig = create_plotly_price_signals(results, crypto)
+            if price_signals_fig:
+                price_signals_path = os.path.join(plotly_dir, f"{crypto}_price_signals.html")
+                price_signals_fig.write_html(price_signals_path)
+                print(f"  Saved interactive price signals chart to {price_signals_path}")
+        except Exception as e:
+            print(f"  Error creating price signals chart: {str(e)}")
+        
+        # Create portfolio growth chart
+        try:
+            portfolio_fig = create_plotly_portfolio_growth(results, crypto)
+            if portfolio_fig:
+                portfolio_path = os.path.join(plotly_dir, f"{crypto}_portfolio.html")
+                portfolio_fig.write_html(portfolio_path)
+                print(f"  Saved interactive portfolio chart to {portfolio_path}")
+        except Exception as e:
+            print(f"  Error creating portfolio chart: {str(e)}")
+        
+        # Create performance metrics chart
+        try:
+            metrics_fig = create_plotly_performance_metrics(performance)
+            if metrics_fig:
+                metrics_path = os.path.join(plotly_dir, f"{crypto}_metrics.html")
+                metrics_fig.write_html(metrics_path)
+                print(f"  Saved interactive metrics chart to {metrics_path}")
+        except Exception as e:
+            print(f"  Error creating metrics chart: {str(e)}")
+            
+        # Create HTML report
+        try:
+            report_path = create_html_report(results, performance, crypto, plotly_dir, 
+                                           os.path.join(dashboard_dir, f"{crypto}_report.html"))
+            print(f"  Saved HTML report to {report_path}")
+        except Exception as e:
+            print(f"  Error creating HTML report: {str(e)}")
+    except Exception as e:
+        print(f"Error creating Plotly visualizations: {str(e)}")
     
-    # Plot portfolio growth
-    if 'portfolio_value' in results.columns:
-        portfolio_path = os.path.join(save_dir, f"{crypto}_portfolio.png")
-        plot_portfolio_growth(results, title=f'{crypto} Portfolio Growth', save_path=portfolio_path)
-    
-    # Plot performance metrics
-    metrics_path = os.path.join(save_dir, f"{crypto}_metrics.png")
-    plot_performance_metrics(performance, title=f'{crypto} Performance Metrics', save_path=metrics_path)
-    
-    # Create an HTML report
-    html_path = os.path.join(save_dir, f"{crypto}_report.html")
-    create_html_report(results, performance, crypto, save_dir, html_path)
-    
-    print(f"Matplotlib dashboard saved to {save_dir}")
-    
-    # Create and save interactive Plotly visualizations
-    create_plotly_trading_dashboard(results, performance, crypto, save_dir)
-    
-    return save_dir
+    print(f"Dashboard created in {dashboard_dir}")
+    return dashboard_dir
 
 
 def create_html_report(results, performance, crypto, img_dir, output_path):
@@ -503,20 +583,33 @@ def create_plotly_price_signals(results, crypto='BTC'):
         plotly.graph_objects.Figure: Plotly figure
     """
     # Check if required columns exist
-    required_cols = ['date', 'signal', 'hmm_state']
+    required_cols = ['date', 'signal']
+    optional_cols = ['hmm_state', 'lstm_signal', 'prediction', 'probability']
     price_col = None
     
-    if 'price' in results.columns:
-        price_col = 'price'
-    elif 'close' in results.columns:
-        price_col = 'close'
+    # Find price column
+    for col in ['price', 'close', 'price_usd_close', 'value']:
+        if col in results.columns:
+            price_col = col
+            break
     
-    if price_col is None or not all(col in results.columns for col in required_cols):
-        print("Warning: Required columns missing for plotting")
-        return None
+    if price_col is None or 'date' not in results.columns or 'signal' not in results.columns:
+        print(f"Warning: Required columns missing for plotting. Found columns: {results.columns.tolist()}")
+        # Create a simple figure with a message
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Cannot create chart: Missing required columns",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=20)
+        )
+        fig.update_layout(title="Price and Signals - Data Missing")
+        return fig
     
-    # Create figure with secondary y-axis
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    # Create figure with secondary y-axis (only if we have state data)
+    has_state = 'hmm_state' in results.columns
+    fig = make_subplots(specs=[[{"secondary_y": has_state}]])
     
     # Add price line
     fig.add_trace(
@@ -565,22 +658,43 @@ def create_plotly_price_signals(results, crypto='BTC'):
             )
         )
     
-    # Add HMM states on secondary y-axis
-    fig.add_trace(
-        go.Scatter(
-            x=results['date'],
-            y=results['hmm_state'],
-            mode='lines',
-            name='HMM State',
-            line=dict(color='purple', width=1, dash='dot'),
-            opacity=0.7
-        ),
-        secondary_y=True
-    )
+    # Add HMM states on secondary y-axis (if available)
+    if 'hmm_state' in results.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=results['date'],
+                y=results['hmm_state'],
+                mode='lines',
+                name='HMM State',
+                line=dict(color='purple', width=1, dash='dot'),
+                opacity=0.7
+            ),
+            secondary_y=True
+        )
+        # Set secondary y-axis title
+        fig.update_yaxes(title_text="HMM State", secondary_y=True)
+    
+    # Add LSTM predictions if available
+    if 'lstm_prediction' in results.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=results['date'],
+                y=results['lstm_prediction'],
+                mode='lines',
+                name='LSTM Prediction',
+                line=dict(color='orange', width=1, dash='dot'),
+                opacity=0.7
+            ),
+            secondary_y=True
+        )
     
     # Set titles and labels
+    model_type = "HMM" if "hmm_state" in results.columns else "ML"
+    if "lstm_prediction" in results.columns or "lstm_signal" in results.columns:
+        model_type = "LSTM"
+    
     fig.update_layout(
-        title=f'{crypto} Price with HMM Trading Signals',
+        title=f'{crypto} Price with {model_type} Trading Signals',
         xaxis_title='Date',
         yaxis_title=f'{crypto} Price (USD)',
         template='plotly_dark',
@@ -594,9 +708,8 @@ def create_plotly_price_signals(results, crypto='BTC'):
         )
     )
     
-    # Set y-axes titles
+    # Set y-axes title (always set the primary y-axis)
     fig.update_yaxes(title_text=f"{crypto} Price (USD)", secondary_y=False)
-    fig.update_yaxes(title_text="HMM State", secondary_y=True)
     
     return fig
 
@@ -612,30 +725,78 @@ def create_plotly_portfolio_growth(results, crypto='BTC'):
     Returns:
         plotly.graph_objects.Figure: Plotly figure
     """
-    # Check if we need to calculate portfolio value
-    if 'portfolio_value' not in results.columns and 'strategy_value' in results.columns:
-        # Use strategy_value column instead
-        results = results.copy()
-        results['portfolio_value'] = results['strategy_value']
-    elif 'portfolio_value' not in results.columns and 'cumulative_returns' in results.columns:
-        # Calculate portfolio value from cumulative returns
-        results = results.copy()
-        initial_value = 10000  # Assume $10,000 starting capital
-        results['portfolio_value'] = initial_value * (1 + results['cumulative_returns'])
+    # Make a copy to avoid modifying the original
+    results = results.copy()
     
+    # Check if we need to calculate portfolio value
     if 'portfolio_value' not in results.columns:
-        print("Warning: portfolio_value column missing and cannot be calculated")
-        # Create a simple figure with a message
-        fig = go.Figure()
-        fig.add_annotation(
-            text="Portfolio value data not available",
-            xref="paper", yref="paper",
-            x=0.5, y=0.5,
-            showarrow=False,
-            font=dict(size=20)
-        )
-        fig.update_layout(title="Portfolio Growth - Data Missing")
-        return fig
+        price_col = None
+        for col in ['price', 'close', 'price_usd_close', 'value']:
+            if col in results.columns:
+                price_col = col
+                break
+                
+        if price_col is None:
+            print("Warning: No price column found for portfolio calculation")
+            # Create a simple figure with a message
+            fig = go.Figure()
+            fig.add_annotation(
+                text="Portfolio value data not available - No price column",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5,
+                showarrow=False,
+                font=dict(size=20)
+            )
+            fig.update_layout(title="Portfolio Growth - Data Missing")
+            return fig
+            
+        # Try to calculate portfolio value using different available columns
+        if 'strategy_value' in results.columns:
+            # Use strategy_value column
+            results['portfolio_value'] = results['strategy_value']
+            print("Using 'strategy_value' for portfolio calculations")
+        elif 'cumulative_returns' in results.columns:
+            # Calculate portfolio value from cumulative returns
+            initial_value = 10000  # Assume $10,000 starting capital
+            results['portfolio_value'] = initial_value * (1 + results['cumulative_returns'])
+            print("Calculated portfolio value from 'cumulative_returns'")
+        elif 'signal' in results.columns:
+            # Calculate portfolio value from signals and price
+            print("Calculating portfolio value from signals and price...")
+            initial_value = 10000  # Assume $10,000 starting capital
+            
+            # Initialize columns for position and portfolio value
+            results['position'] = 0
+            results['portfolio_value'] = initial_value
+            
+            # Fill in positions - 1 for long, -1 for short, 0 for cash
+            for i in range(1, len(results)):
+                if results.iloc[i-1]['signal'] == 1:  # Buy signal
+                    results.loc[results.index[i], 'position'] = 1
+                elif results.iloc[i-1]['signal'] == -1:  # Sell signal
+                    results.loc[results.index[i], 'position'] = -1 if 'no_shorts' not in results.columns else 0
+                else:
+                    results.loc[results.index[i], 'position'] = results.iloc[i-1]['position']
+            
+            # Calculate daily returns based on position
+            results['daily_return'] = results[price_col].pct_change() * results['position']
+            
+            # Calculate cumulative returns and portfolio value
+            results['cumulative_returns'] = (1 + results['daily_return'].fillna(0)).cumprod() - 1
+            results['portfolio_value'] = initial_value * (1 + results['cumulative_returns'])
+        else:
+            print("Warning: Cannot calculate portfolio value - missing required columns")
+            # Create a simple figure with a message
+            fig = go.Figure()
+            fig.add_annotation(
+                text="Portfolio value data not available - Missing required columns",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5,
+                showarrow=False,
+                font=dict(size=20)
+            )
+            fig.update_layout(title="Portfolio Growth - Data Missing")
+            return fig
     
     fig = go.Figure()
     
@@ -645,49 +806,40 @@ def create_plotly_portfolio_growth(results, crypto='BTC'):
             x=results['date'],
             y=results['portfolio_value'],
             mode='lines',
-            name='Strategy',
+            name='Portfolio Value',
             line=dict(color='green', width=2)
         )
     )
     
-    # Add buy-and-hold line if available
+    # Add a horizontal line for the initial value
+    initial_value = results['portfolio_value'].iloc[0]
+    fig.add_shape(
+        type="line",
+        x0=results['date'].iloc[0],
+        y0=initial_value,
+        x1=results['date'].iloc[-1],
+        y1=initial_value,
+        line=dict(color="gray", width=1, dash="dash"),
+    )
+    
+    # Get the buy & hold ending value
     if 'buy_hold_value' in results.columns:
+        buy_hold_value = results['buy_hold_value']
+        
+        # Add buy & hold line
         fig.add_trace(
             go.Scatter(
                 x=results['date'],
-                y=results['buy_hold_value'],
+                y=buy_hold_value,
                 mode='lines',
                 name='Buy & Hold',
-                line=dict(color='gray', width=1.5, dash='dash')
+                line=dict(color='blue', width=1.5, dash='dot')
             )
         )
     
-    # Add position information if available
-    if 'position' in results.columns:
-        # Get position change points
-        position_changes = results[results['position'].diff() != 0]
-        
-        # Add position annotations
-        for idx, row in position_changes.iterrows():
-            position_text = "LONG" if row['position'] > 0 else "SHORT" if row['position'] < 0 else "CASH"
-            position_color = "green" if row['position'] > 0 else "red" if row['position'] < 0 else "yellow"
-            
-            fig.add_annotation(
-                x=row['date'],
-                y=row['portfolio_value'],
-                text=position_text,
-                showarrow=True,
-                arrowhead=2,
-                arrowcolor=position_color,
-                arrowsize=1,
-                arrowwidth=1,
-                ax=0,
-                ay=-40
-            )
-    
-    # Set titles and layout
+    # Set titles and labels
     fig.update_layout(
-        title=f'{crypto} Trading Strategy Performance',
+        title=f'{crypto} Portfolio Growth',
         xaxis_title='Date',
         yaxis_title='Portfolio Value (USD)',
         template='plotly_dark',
@@ -702,10 +854,7 @@ def create_plotly_portfolio_growth(results, crypto='BTC'):
     )
     
     # Format y-axis as currency
-    fig.update_yaxes(
-        tickprefix='$',
-        tickformat=',.2f'
-    )
+    fig.update_yaxes(tickprefix='$')
     
     return fig
 
@@ -720,42 +869,103 @@ def create_plotly_performance_metrics(performance):
     Returns:
         plotly.graph_objects.Figure: Plotly figure
     """
-    # Convert performance dict to DataFrame for plotting
-    metrics = {k: v for k, v in performance.items() if isinstance(v, (int, float))}
-    metrics_df = pd.DataFrame(list(metrics.items()), columns=['Metric', 'Value'])
+    if not performance or not isinstance(performance, dict):
+        print("Warning: No performance metrics provided")
+        # Create a simple figure with a message
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Performance metrics not available",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=20)
+        )
+        fig.update_layout(title="Performance Metrics - Data Missing")
+        return fig
+        
+    # Extract numeric metrics
+    metrics = {k: v for k, v in performance.items() if isinstance(v, (int, float)) and not pd.isna(v)}
     
-    # Sort by absolute value (using pandas sort_values instead of argsort)
-    metrics_df = metrics_df.sort_values('Value', key=abs, ascending=False)
+    if not metrics:
+        print("Warning: No numeric performance metrics found")
+        # Create a simple figure with a message
+        fig = go.Figure()
+        fig.add_annotation(
+            text="No numeric performance metrics available",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=20)
+        )
+        fig.update_layout(title="Performance Metrics - No Data")
+        return fig
     
-    # Create color map (green for positive, red for negative)
-    colors = ['green' if v > 0 else 'red' for v in metrics_df['Value']]
+    # Sort metrics by absolute value
+    sorted_metrics = sorted(metrics.items(), key=lambda x: abs(x[1]), reverse=True)
     
-    # Create bar chart
-    fig = px.bar(
-        metrics_df,
-        y='Metric',
-        x='Value',
-        orientation='h',
-        color_discrete_sequence=colors,
-        labels={'Value': 'Value', 'Metric': ''},
-        title='Strategy Performance Metrics'
+    # Create figure for bar chart
+    fig = go.Figure()
+    
+    # Create separate traces for positive and negative metrics
+    positive_metrics = [(k, v) for k, v in sorted_metrics if v >= 0]
+    negative_metrics = [(k, v) for k, v in sorted_metrics if v < 0]
+    
+    if positive_metrics:
+        fig.add_trace(
+            go.Bar(
+                x=[m[0] for m in positive_metrics],
+                y=[m[1] for m in positive_metrics],
+                name='Positive Metrics',
+                marker_color='green'
+            )
+        )
+    
+    if negative_metrics:
+        fig.add_trace(
+            go.Bar(
+                x=[m[0] for m in negative_metrics],
+                y=[m[1] for m in negative_metrics],
+                name='Negative Metrics',
+                marker_color='red'
+            )
+        )
+    
+    # Add horizontal line at y=0
+    fig.add_shape(
+        type="line",
+        x0=-0.5,
+        y0=0,
+        x1=len(metrics) - 0.5,
+        y1=0,
+        line=dict(color="white", width=1)
     )
     
-    # Add value labels
-    fig.update_traces(
-        texttemplate='%{x:.4f}',
-        textposition='outside'
-    )
-    
-    # Update layout
+    # Set titles and labels
     fig.update_layout(
+        title='Trading Strategy Performance Metrics',
+        xaxis_title='Metric',
+        yaxis_title='Value',
         template='plotly_dark',
-        xaxis_title='Value',
-        yaxis=dict(
-            categoryorder='total ascending'
-        ),
-        height=600,
-        margin=dict(l=200)
+        hovermode='closest',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
     )
+    
+    # Add data labels
+    for i, (metric, value) in enumerate(sorted_metrics):
+        text_position = 'outside' if value >= 0 else 'outside'
+        fig.add_annotation(
+            x=metric,
+            y=value,
+            text=f"{value:.4f}",
+            showarrow=False,
+            yshift=10 if value >= 0 else -10,
+            font=dict(color='white')
+        )
     
     return fig 

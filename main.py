@@ -77,6 +77,13 @@ def parse_args():
                         help='Window size for LSTM model (default: 30)')
     parser.add_argument('--use_lstm', action='store_true',
                         help='Include LSTM model in hybrid approach')
+    # Performance metric thresholds
+    parser.add_argument('--min_sharpe', type=float, default=MIN_SHARPE_RATIO,
+                        help=f'Minimum Sharpe ratio target (default: {MIN_SHARPE_RATIO})')
+    parser.add_argument('--max_drawdown', type=float, default=MAX_DRAWDOWN_LIMIT,
+                        help=f'Maximum drawdown limit as negative percentage (default: {MAX_DRAWDOWN_LIMIT})')
+    parser.add_argument('--min_trade_freq', type=float, default=MIN_TRADE_FREQUENCY,
+                        help=f'Minimum trading frequency target (default: {MIN_TRADE_FREQUENCY})')
     
     return parser.parse_args()
 
@@ -249,9 +256,26 @@ def train_model(data, args):
         else:
             raise ValueError(f"Unknown model type: {args.model}")
         
-        if args.save_model and args.model == 'hmm':
-            model_path = model.save_model()
-            print(f"Model saved to {model_path}")
+        # Save model if requested
+        if args.save_model:
+            if args.model == 'hmm':
+                model_path = model.save_model()
+                print(f"HMM model saved to {model_path}")
+            elif args.model == 'xgboost' and hasattr(model, 'save_model'):
+                model_path = model.save_model()
+                print(f"XGBoost model saved to {model_path}")
+            elif args.model == 'lstm' and hasattr(model, 'save_model'):
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                model_path = os.path.join(MODELS_DIR, f"lstm_model_{timestamp}.pt")
+                model.save_model(model_path)
+                print(f"LSTM model saved to {model_path}")
+            elif args.model == 'hybrid' and hasattr(model, 'save_model'):
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                model_path = os.path.join(MODELS_DIR, f"hybrid_model_{timestamp}")
+                model.save_model(model_path)
+                print(f"Hybrid model saved to {model_path}")
+            else:
+                print(f"Model saving not implemented for {args.model} model")
     
     return model, test_data
 
@@ -261,11 +285,31 @@ def run_backtest(model, data, args):
     print("Running backtest...")
     
     # Determine which price column to use
-    price_col = 'price_usd_close' if 'price_usd_close' in data.columns else 'close'
-    if 'price' in data.columns:
-        price_col = 'price'
-    elif 'value' in data.columns:
-        price_col = 'value'
+    price_cols = ['price_usd_close', 'close', 'price', 'value']
+    price_col = None
+    
+    # Find the first available price column in the data
+    for col in price_cols:
+        if col in data.columns:
+            price_col = col
+            print(f"Using '{price_col}' as the price column")
+            break
+    
+    if price_col is None:
+        # If no standard price column is found, try to find any column with 'price' in the name
+        price_candidates = [col for col in data.columns if 'price' in col.lower()]
+        if price_candidates:
+            price_col = price_candidates[0]
+            print(f"Using '{price_col}' as the price column")
+        else:
+            # If all else fails, use the first numeric column as a last resort
+            numeric_cols = data.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) > 0:
+                price_col = numeric_cols[0]
+                print(f"WARNING: No price column found. Using '{price_col}' as a proxy.")
+            else:
+                print("ERROR: No suitable price column found in the data.")
+                return None, None
     
     results = None
     performance = None
@@ -353,21 +397,26 @@ def run_backtest(model, data, args):
     return results, performance
 
 
-def evaluate_performance(performance):
+def evaluate_performance(performance, args):
     """Evaluate if the strategy meets performance criteria."""
     sharpe_ratio = performance['Sharpe Ratio']
     max_drawdown = performance['Max Drawdown']
     trading_frequency = performance['Trading Frequency']
     
+    # Use command line args for threshold values if provided
+    min_sharpe_target = args.min_sharpe
+    max_drawdown_limit = args.max_drawdown
+    min_trade_freq_target = args.min_trade_freq
+    
     print("\nPerformance Evaluation:")
-    print(f"Sharpe Ratio: {sharpe_ratio:.4f} (Target ≥ {MIN_SHARPE_RATIO})")
-    print(f"Max Drawdown: {max_drawdown:.4f} (Target ≥ {MAX_DRAWDOWN_LIMIT})")
-    print(f"Trading Frequency: {trading_frequency:.4f} (Target ≥ {MIN_TRADE_FREQUENCY})")
+    print(f"Sharpe Ratio: {sharpe_ratio:.4f} (Target ≥ {min_sharpe_target})")
+    print(f"Max Drawdown: {max_drawdown:.4f} (Target > {max_drawdown_limit})")
+    print(f"Trading Frequency: {trading_frequency:.4f} (Target ≥ {min_trade_freq_target})")
     
     meets_criteria = (
-        sharpe_ratio >= MIN_SHARPE_RATIO and
-        max_drawdown >= MAX_DRAWDOWN_LIMIT and
-        trading_frequency >= MIN_TRADE_FREQUENCY
+        sharpe_ratio >= min_sharpe_target and
+        max_drawdown > max_drawdown_limit and
+        trading_frequency >= min_trade_freq_target
     )
     
     if meets_criteria:
@@ -375,12 +424,12 @@ def evaluate_performance(performance):
     else:
         print("\n❌ Strategy does not meet all performance criteria.")
         
-        if sharpe_ratio < MIN_SHARPE_RATIO:
-            print(f"  - Sharpe Ratio is below target ({sharpe_ratio:.4f} < {MIN_SHARPE_RATIO})")
-        if max_drawdown < MAX_DRAWDOWN_LIMIT:
-            print(f"  - Max Drawdown is worse than target ({max_drawdown:.4f} < {MAX_DRAWDOWN_LIMIT})")
-        if trading_frequency < MIN_TRADE_FREQUENCY:
-            print(f"  - Trading Frequency is below target ({trading_frequency:.4f} < {MIN_TRADE_FREQUENCY})")
+        if sharpe_ratio < min_sharpe_target:
+            print(f"  - Sharpe Ratio is below target ({sharpe_ratio:.4f} < {min_sharpe_target})")
+        if max_drawdown <= max_drawdown_limit:
+            print(f"  - Max Drawdown is worse than target ({max_drawdown:.4f} ≤ {max_drawdown_limit})")
+        if trading_frequency < min_trade_freq_target:
+            print(f"  - Trading Frequency is below target ({trading_frequency:.4f} < {min_trade_freq_target})")
     
     # Compare to buy-and-hold
     print("\nComparison to Buy & Hold:")
@@ -426,7 +475,7 @@ def main():
     results, performance = run_backtest(model, test_data, args)
     
     # Evaluate performance against criteria
-    success = evaluate_performance(performance)
+    success = evaluate_performance(performance, args)
     
     # Save results
     if not args.skip_plots:

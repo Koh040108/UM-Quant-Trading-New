@@ -216,135 +216,134 @@ class LSTMPredictor:
     
     def fit(self, df, price_col='price', target_col=None, feature_cols=None, epochs=200, batch_size=32, validation_split=0.2, patience=20):
         """
-        Fit the LSTM model to the data.
+        Fit the LSTM model on the data.
         
         Args:
-            df (pd.DataFrame): DataFrame with features
+            df (pd.DataFrame): DataFrame with price and features
             price_col (str): Name of the price column
-            target_col (str, optional): Name of the target column, defaults to price_col
+            target_col (str, optional): Target column for prediction
             feature_cols (list, optional): List of feature columns to use
-            epochs (int): Number of training epochs
+            epochs (int): Maximum number of training epochs
             batch_size (int): Batch size for training
-            validation_split (float): Fraction of data to use for validation
-            patience (int): Patience for early stopping
+            validation_split (float): Proportion of data to use for validation
+            patience (int): Number of epochs with no improvement after which training will be stopped
             
         Returns:
-            self: Fitted model
+            LSTMPredictor: Self for method chaining
         """
-        # Prepare data
-        X, y = self._prepare_data(df, price_col, target_col, feature_cols)
+        # Set price column as target if not provided
+        if target_col is None:
+            target_col = price_col
         
-        # Set input dimension based on data
-        input_dim = X.shape[2]
+        # Prepare data
+        X, y = self._prepare_data(df, price_col=price_col, target_col=target_col, feature_cols=feature_cols)
+        
+        # Get number of features
+        _, _, n_features = X.shape
+        
+        # Scale data
+        X_scaled, y_scaled = self._scale_data(X, y, is_train=True)
+        
+        # Reshape scaled data back to 3D
+        X_scaled = X_scaled.reshape(-1, self.window_size, n_features)
+        
+        # Split data into training and validation sets
+        split_idx = int(len(X_scaled) * (1 - validation_split))
+        X_train, X_val = X_scaled[:split_idx], X_scaled[split_idx:]
+        y_train, y_val = y_scaled[:split_idx], y_scaled[split_idx:]
+        
+        # Convert to torch tensors
+        X_train_tensor = torch.FloatTensor(X_train).to(self.device)
+        y_train_tensor = torch.FloatTensor(y_train).to(self.device)
+        X_val_tensor = torch.FloatTensor(X_val).to(self.device)
+        y_val_tensor = torch.FloatTensor(y_val).to(self.device)
+        
+        # Create dataloaders
+        train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
+        val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
+        
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size)
         
         # Initialize model
         self.model = LSTMModel(
-            input_dim=input_dim,
+            input_dim=n_features,
             hidden_dim=self.hidden_dim,
             num_layers=self.num_layers,
             output_dim=self.output_dim,
             dropout=self.dropout
         ).to(self.device)
         
-        # Scale data
-        X_scaled, y_scaled = self._scale_data(X, y, is_train=True)
-        
-        # Split into training and validation sets
-        split_idx = int(len(X_scaled) * (1 - validation_split))
-        X_train, X_val = X_scaled[:split_idx], X_scaled[split_idx:]
-        y_train, y_val = y_scaled[:split_idx], y_scaled[split_idx:]
-        
-        # Convert to PyTorch tensors
-        X_train = torch.tensor(X_train, dtype=torch.float32).to(self.device)
-        y_train = torch.tensor(y_train, dtype=torch.float32).to(self.device)
-        X_val = torch.tensor(X_val, dtype=torch.float32).to(self.device)
-        y_val = torch.tensor(y_val, dtype=torch.float32).to(self.device)
-        
-        # Create datasets and dataloaders
-        train_dataset = TensorDataset(X_train, y_train)
-        val_dataset = TensorDataset(X_val, y_val)
-        
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size)
-        
         # Define loss function and optimizer
-        criterion = nn.BCELoss() if self.output_dim == 1 else nn.BCEWithLogitsLoss()
-        optimizer = optim.Adam(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(
+            self.model.parameters(),
+            lr=self.learning_rate,
+            weight_decay=self.weight_decay
+        )
         
-        # Early stopping
+        # Initialize early stopping variables
         best_val_loss = float('inf')
-        no_improve_epochs = 0
-        best_model_state = None
+        epochs_no_improve = 0
+        best_model = None
+        
+        print(f"Starting LSTM training: {epochs} max epochs, batch size {batch_size}, patience {patience}")
+        print(f"Training samples: {len(X_train)}, Validation samples: {len(X_val)}")
         
         # Training loop
-        train_losses = []
-        val_losses = []
-        
-        print("Training LSTM model...")
         for epoch in range(epochs):
-            # Training
+            # Training phase
             self.model.train()
-            train_loss = 0
+            train_loss = 0.0
             for X_batch, y_batch in train_loader:
+                # Zero the gradients
+                optimizer.zero_grad()
+                
                 # Forward pass
                 outputs = self.model(X_batch)
+                
+                # Calculate loss
                 loss = criterion(outputs, y_batch)
                 
-                # Backward pass and optimize
-                optimizer.zero_grad()
+                # Backward pass and optimization
                 loss.backward()
                 optimizer.step()
                 
                 train_loss += loss.item()
             
-            # Calculate average training loss
-            train_loss /= len(train_loader)
-            train_losses.append(train_loss)
+            avg_train_loss = train_loss / len(train_loader)
             
-            # Validation
+            # Validation phase
             self.model.eval()
-            val_loss = 0
+            val_loss = 0.0
             with torch.no_grad():
                 for X_batch, y_batch in val_loader:
                     outputs = self.model(X_batch)
                     loss = criterion(outputs, y_batch)
                     val_loss += loss.item()
             
-            # Calculate average validation loss
-            val_loss /= len(val_loader)
-            val_losses.append(val_loss)
+            avg_val_loss = val_loss / len(val_loader)
+            
+            # Print progress every 10 epochs or on the last epoch
+            if (epoch + 1) % 10 == 0 or epoch == 0 or epoch == epochs - 1 or avg_val_loss < best_val_loss:
+                print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f}, Val Loss: {avg_val_loss:.6f}")
             
             # Early stopping
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                no_improve_epochs = 0
-                best_model_state = self.model.state_dict().copy()
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                epochs_no_improve = 0
+                best_model = self.model.state_dict()
+                print(f"Epoch {epoch+1}: New best validation loss: {best_val_loss:.6f}")
             else:
-                no_improve_epochs += 1
-            
-            # Print progress
-            if (epoch + 1) % 10 == 0:
-                print(f"Epoch {epoch+1}/{epochs}, Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
-            
-            # Check early stopping
-            if no_improve_epochs >= patience:
-                print(f"Early stopping at epoch {epoch+1}")
-                break
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch+1}. Best validation loss: {best_val_loss:.6f}")
+                    break
         
-        # Load best model
-        if best_model_state is not None:
-            self.model.load_state_dict(best_model_state)
-        
-        # Plot training and validation loss
-        plt.figure(figsize=(10, 5))
-        plt.plot(train_losses, label='Training Loss')
-        plt.plot(val_losses, label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('LSTM Training and Validation Loss')
-        plt.legend()
-        plt.grid(True)
-        plt.show()
+        # Load the best model
+        if best_model is not None:
+            self.model.load_state_dict(best_model)
+            print(f"Training complete. Final best validation loss: {best_val_loss:.6f}")
         
         return self
     
