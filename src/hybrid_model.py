@@ -1,5 +1,5 @@
 """
-Hybrid model combining HMM and XGBoost for trading signals.
+Hybrid model combining HMM, XGBoost and LSTM for trading signals.
 """
 
 import numpy as np
@@ -8,27 +8,36 @@ import matplotlib.pyplot as plt
 
 from src.hmm_model import MarketHMM
 from src.xgboost_model import XGBoostPredictor
+from src.lstm_model import LSTMPredictor
 
 class HybridTradingModel:
     """
-    Hybrid trading model that combines HMM and XGBoost predictions.
+    Hybrid trading model that combines HMM, XGBoost, and LSTM predictions.
     """
     
-    def __init__(self, n_states=5, n_lags=2, random_state=42):
+    def __init__(self, n_states=5, n_lags=2, window_size=30, use_lstm=True, random_state=42):
         """
         Initialize the hybrid model.
         
         Args:
             n_states (int): Number of HMM states
             n_lags (int): Number of lag features for XGBoost
+            window_size (int): Size of the lookback window for LSTM
+            use_lstm (bool): Whether to use LSTM model
             random_state (int): Random seed for reproducibility
         """
         self.hmm_model = MarketHMM(n_states=n_states)
         self.xgb_model = XGBoostPredictor(n_lags=n_lags, random_state=random_state)
+        self.use_lstm = use_lstm
+        
+        if use_lstm:
+            self.lstm_model = LSTMPredictor(window_size=window_size)
+        else:
+            self.lstm_model = None
         
     def fit(self, df, price_col='price'):
         """
-        Fit both models to the data.
+        Fit all models to the data.
         
         Args:
             df (pd.DataFrame): DataFrame with price data
@@ -40,9 +49,13 @@ class HybridTradingModel:
         print("Training XGBoost model...")
         self.xgb_model.fit(df, price_col=price_col)
         
+        if self.use_lstm:
+            print("Training LSTM model...")
+            self.lstm_model.fit(df, price_col=price_col)
+        
     def predict(self, df, price_col='price', threshold=0.0):
         """
-        Generate predictions from both models.
+        Generate predictions from all models.
         
         Args:
             df (pd.DataFrame): DataFrame with price data
@@ -66,15 +79,25 @@ class HybridTradingModel:
         xgb_data = self.xgb_model.predict(df, price_col=price_col)
         xgb_signals = self.xgb_model.generate_trading_signals(xgb_data)
         
-        # Combine the results
-        print("Combining signals...")
-        combined = self._combine_signals(hmm_signals, xgb_signals)
+        if self.use_lstm:
+            # Generate LSTM predictions and signals
+            print("Generating LSTM predictions...")
+            lstm_data = self.lstm_model.predict(df, price_col=price_col)
+            lstm_signals = self.lstm_model.generate_trading_signals(lstm_data)
+            
+            # Combine all three models
+            print("Combining signals from all three models...")
+            combined = self._combine_all_signals(hmm_signals, xgb_signals, lstm_signals)
+        else:
+            # Combine just HMM and XGBoost
+            print("Combining HMM and XGBoost signals...")
+            combined = self._combine_signals(hmm_signals, xgb_signals)
         
         return combined
     
     def _combine_signals(self, hmm_df, xgb_df):
         """
-        Combine signals from both models.
+        Combine signals from HMM and XGBoost models.
         
         Args:
             hmm_df (pd.DataFrame): DataFrame with HMM signals
@@ -134,6 +157,96 @@ class HybridTradingModel:
         
         return result
     
+    def _combine_all_signals(self, hmm_df, xgb_df, lstm_df):
+        """
+        Combine signals from all three models (HMM, XGBoost, and LSTM).
+        
+        Args:
+            hmm_df (pd.DataFrame): DataFrame with HMM signals
+            xgb_df (pd.DataFrame): DataFrame with XGBoost signals
+            lstm_df (pd.DataFrame): DataFrame with LSTM signals
+            
+        Returns:
+            pd.DataFrame: DataFrame with combined signals
+        """
+        # First combine HMM and XGBoost
+        result = self._combine_signals(hmm_df, xgb_df)
+        
+        # Check that we have data to work with
+        if result.empty:
+            print("Warning: Empty result after combining HMM and XGBoost signals")
+            return result
+            
+        # Find common indices for all three datasets
+        common_idx = result.index.intersection(lstm_df.index)
+        
+        if len(common_idx) == 0:
+            print("Warning: No common indices between combined signals and LSTM signals")
+            return result
+            
+        # Make sure we have aligned data
+        result = result.loc[common_idx].copy()
+        lstm_aligned = lstm_df.loc[common_idx].copy()
+        
+        # Add LSTM columns
+        for col in ['lstm_pred', 'lstm_signal']:
+            if col in lstm_aligned.columns:
+                result[col] = lstm_aligned[col]
+        
+        # Check if we have all required signal columns
+        required_columns = ['signal', 'xgb_signal', 'lstm_signal']
+        for col in required_columns:
+            if col not in result.columns:
+                print(f"Warning: Missing required column '{col}' in combined signals")
+                if col == 'signal':
+                    result['signal'] = 0
+                elif col == 'xgb_signal':
+                    result['xgb_signal'] = 0
+                elif col == 'lstm_signal':
+                    result['lstm_signal'] = 0
+        
+        # Create a temporary matrix of signals for voting
+        signal_matrix = pd.DataFrame({
+            'hmm': result['signal'],
+            'xgb': result['xgb_signal'],
+            'lstm': result['lstm_signal']
+        })
+        
+        # Count votes for each direction
+        signal_matrix['buy_votes'] = (signal_matrix > 0).sum(axis=1)
+        signal_matrix['sell_votes'] = (signal_matrix < 0).sum(axis=1)
+        signal_matrix['neutral_votes'] = (signal_matrix == 0).sum(axis=1)
+        
+        # Create ensemble signal based on voting
+        result['ensemble_signal'] = 0
+        
+        # Unanimous agreement
+        mask_unanimous_buy = signal_matrix['buy_votes'] == 3
+        mask_unanimous_sell = signal_matrix['sell_votes'] == 3
+        result.loc[mask_unanimous_buy, 'ensemble_signal'] = 1
+        result.loc[mask_unanimous_sell, 'ensemble_signal'] = -1
+        
+        # Majority agreement (2 out of 3)
+        mask_majority_buy = (signal_matrix['buy_votes'] == 2) & (signal_matrix['sell_votes'] < 2)
+        mask_majority_sell = (signal_matrix['sell_votes'] == 2) & (signal_matrix['buy_votes'] < 2)
+        result.loc[mask_majority_buy, 'ensemble_signal'] = 1
+        result.loc[mask_majority_sell, 'ensemble_signal'] = -1
+        
+        # When there's complete disagreement or majority is neutral, rely on HMM for market regime
+        mask_disagree = (signal_matrix['buy_votes'] == 1) & (signal_matrix['sell_votes'] == 1) & (signal_matrix['neutral_votes'] == 1)
+        mask_neutral_majority = signal_matrix['neutral_votes'] >= 2
+        
+        # For disagreement, use HMM (market regime) as tiebreaker
+        result.loc[mask_disagree, 'ensemble_signal'] = result.loc[mask_disagree, 'signal']
+        
+        # For neutral majority, stay neutral (0)
+        result.loc[mask_neutral_majority, 'ensemble_signal'] = 0
+        
+        # Use the ensemble signal as the final combined signal
+        result['combined_signal'] = result['ensemble_signal']
+        
+        return result
+    
     def backtest_strategy(self, df, price_col='price', fee=0.001, allow_shorts=True):
         """
         Backtest the hybrid trading strategy.
@@ -147,11 +260,52 @@ class HybridTradingModel:
         Returns:
             tuple: (results DataFrame, performance metrics dict)
         """
+        # Check if the dataframe is empty
+        if df.empty:
+            print("Error: Empty DataFrame provided for backtesting")
+            # Return empty results and default performance metrics
+            empty_perf = {
+                'Total Return': 0.0,
+                'Annualized Return': 0.0,
+                'Volatility': 0.0,
+                'Sharpe Ratio': 0.0,
+                'Max Drawdown': 0.0,
+                'Win Rate': 0.0,
+                'Trades': 0,
+                'Buy Trades': 0,
+                'Sell Trades': 0,
+                'Trading Frequency': 0.0,
+                'Long Win Rate': 0.0,
+                'Short Win Rate': 0.0,
+                'Buy Hold Return': 0.0,
+                'Buy Hold Annualized Return': 0.0,
+                'Buy Hold Volatility': 0.0,
+                'Buy Hold Sharpe': 0.0
+            }
+            return pd.DataFrame(), empty_perf
+        
         # Use the HMM model's backtest function with our combined signal
         results = df.copy()
         
         # Replace the original signal with our combined signal
-        results['signal'] = results['combined_signal']
+        if 'combined_signal' in results.columns:
+            results['signal'] = results['combined_signal']
+        elif 'ensemble_signal' in results.columns:
+            results['signal'] = results['ensemble_signal']
+        
+        # Check if we have a signal column
+        if 'signal' not in results.columns:
+            print("Error: No signal column found in results DataFrame")
+            # Try to create one from other available signals
+            if 'hmm_signal' in results.columns:
+                results['signal'] = results['hmm_signal']
+            elif 'xgb_signal' in results.columns:
+                results['signal'] = results['xgb_signal']
+            elif 'lstm_signal' in results.columns:
+                results['signal'] = results['lstm_signal']
+            else:
+                # Default to neutral signal
+                results['signal'] = 0
         
         # Ensure price column exists
         if price_col not in results.columns:
@@ -197,49 +351,47 @@ class HybridTradingModel:
                 
                 positions.append(position)
             
-            # Replace the first position with the second position to handle initialization
-            if len(positions) > 1:
-                positions[0] = positions[1]
+            # Check that positions has the right length before setting it
+            if len(positions) <= len(results):
+                if len(positions) < len(results):
+                    # Fill the missing positions with the last value or 0
+                    missing = len(results) - len(positions)
+                    last_position = positions[-1] if positions else 0
+                    positions.extend([last_position] * missing)
                 
-            results['strategy_position'] = positions
-        
-        # Calculate strategy returns with fees if not already calculated
-        if 'strategy_returns' not in results.columns:
-            results['strategy_returns'] = 0
-            
-            for i in range(1, len(results)):
-                # Check if we made a trade
-                if results['strategy_position'].iloc[i] != results['strategy_position'].iloc[i-1]:
-                    # Apply fee
-                    position_change = results['strategy_position'].iloc[i] - results['strategy_position'].iloc[i-1]
-                    # Absolute value of position change determines the fee
-                    fee_amount = fee * abs(position_change)
-                    results.loc[results.index[i], 'strategy_returns'] = results['returns'].iloc[i] * results['strategy_position'].iloc[i] - fee_amount
-                else:
-                    # No fee if no position change
-                    results.loc[results.index[i], 'strategy_returns'] = results['returns'].iloc[i] * results['strategy_position'].iloc[i]
-        
-        # Calculate cumulative returns if not already calculated
-        if 'strategy_cumulative' not in results.columns:
-            results['strategy_cumulative'] = (1 + results['strategy_returns']).cumprod() - 1
-        
-        if 'buy_hold_returns' not in results.columns:
-            results['buy_hold_returns'] = results['returns']
-        
-        if 'buy_hold_cumulative' not in results.columns:
-            results['buy_hold_cumulative'] = (1 + results['buy_hold_returns']).cumprod() - 1
-        
-        # Calculate portfolio value
-        if 'portfolio_value' not in results.columns:
-            initial_value = 1.0  # Starting with $1
-            results['portfolio_value'] = initial_value * (1 + results['strategy_cumulative'])
+                results['strategy_position'] = positions
+            else:
+                # Something went wrong with position calculation
+                print("Warning: Position calculation issue - using neutral positions")
+                results['strategy_position'] = 0
         
         # Run the backtest
-        results, performance = self.hmm_model.backtest_strategy(
-            results, price_col=price_col, fee=fee, allow_shorts=allow_shorts
-        )
-        
-        return results, performance
+        try:
+            return self.hmm_model.backtest_strategy(
+                results, price_col=price_col, fee=fee, allow_shorts=allow_shorts
+            )
+        except Exception as e:
+            print(f"Error in backtesting: {str(e)}")
+            # Create emergency fallback performance metrics
+            empty_perf = {
+                'Total Return': 0.0,
+                'Annualized Return': 0.0,
+                'Volatility': 0.0,
+                'Sharpe Ratio': 0.0,
+                'Max Drawdown': 0.0,
+                'Win Rate': 0.0,
+                'Trades': 0,
+                'Buy Trades': 0,
+                'Sell Trades': 0,
+                'Trading Frequency': 0.0,
+                'Long Win Rate': 0.0,
+                'Short Win Rate': 0.0,
+                'Buy Hold Return': 0.0,
+                'Buy Hold Annualized Return': 0.0,
+                'Buy Hold Volatility': 0.0,
+                'Buy Hold Sharpe': 0.0
+            }
+            return results, empty_perf
     
     def plot_signals(self, df, price_col='price'):
         """
@@ -249,10 +401,10 @@ class HybridTradingModel:
             df (pd.DataFrame): DataFrame with signals
             price_col (str): Name of the price column
         """
-        plt.figure(figsize=(14, 12))
+        plt.figure(figsize=(14, 15))
         
         # Plot price and smoothed predictions
-        plt.subplot(4, 1, 1)
+        plt.subplot(5, 1, 1)
         plt.plot(df[price_col], label='Price')
         if 'kalman' in df.columns:
             plt.plot(df['kalman'], label='Kalman Smoothed')
@@ -260,14 +412,14 @@ class HybridTradingModel:
         plt.title('Price and Smoothed Prediction')
         
         # Plot HMM states
-        plt.subplot(4, 1, 2)
+        plt.subplot(5, 1, 2)
         plt.plot(df[price_col], alpha=0.3, label='Price')
         plt.scatter(df.index, df[price_col], c=df['hmm_state'], s=10, cmap='viridis', label='HMM States')
         plt.legend()
         plt.title('HMM States')
         
         # Plot derivatives
-        plt.subplot(4, 1, 3)
+        plt.subplot(5, 1, 3)
         if 'gradient' in df.columns and 'second_deriv' in df.columns:
             plt.plot(df['gradient'], label='First Derivative')
             plt.plot(df['second_deriv'], label='Second Derivative')
@@ -276,8 +428,17 @@ class HybridTradingModel:
             plt.legend()
             plt.title('Derivatives')
         
-        # Plot signals
-        plt.subplot(4, 1, 4)
+        # Plot LSTM predictions if available
+        if 'lstm_pred' in df.columns:
+            plt.subplot(5, 1, 4)
+            plt.plot(df[price_col], alpha=0.3, label='Price')
+            plt.plot(df['lstm_pred'], label='LSTM Prediction', color='purple')
+            plt.legend()
+            plt.title('LSTM Predictions')
+        
+        # Plot all signals
+        subplot_position = 5 if 'lstm_pred' in df.columns else 4
+        plt.subplot(5, 1, subplot_position)
         plt.plot(df[price_col], alpha=0.3, label='Price')
         
         # HMM signals
@@ -287,6 +448,11 @@ class HybridTradingModel:
         # XGBoost signals
         xgb_buy_mask = df['xgb_signal'] == 1
         xgb_sell_mask = df['xgb_signal'] == -1
+        
+        # LSTM signals
+        if 'lstm_signal' in df.columns:
+            lstm_buy_mask = df['lstm_signal'] == 1
+            lstm_sell_mask = df['lstm_signal'] == -1
         
         # Combined signals
         combined_buy_mask = df['combined_signal'] == 1
@@ -303,6 +469,13 @@ class HybridTradingModel:
                    color='c', marker='^', s=30, alpha=0.5, label='XGB Buy')
         plt.scatter(df[xgb_sell_mask].index, df.loc[xgb_sell_mask, price_col], 
                    color='m', marker='v', s=30, alpha=0.5, label='XGB Sell')
+        
+        # Plot LSTM signals if available
+        if 'lstm_signal' in df.columns:
+            plt.scatter(df[lstm_buy_mask].index, df.loc[lstm_buy_mask, price_col], 
+                       color='b', marker='^', s=30, alpha=0.5, label='LSTM Buy')
+            plt.scatter(df[lstm_sell_mask].index, df.loc[lstm_sell_mask, price_col], 
+                       color='y', marker='v', s=30, alpha=0.5, label='LSTM Sell')
         
         # Plot combined signals (larger markers)
         plt.scatter(df[combined_buy_mask].index, df.loc[combined_buy_mask, price_col], 

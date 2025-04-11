@@ -24,6 +24,7 @@ from src.hmm_model import MarketHMM
 from src.visualization import create_performance_dashboard
 from src.xgboost_model import XGBoostPredictor
 from src.hybrid_model import HybridTradingModel
+from src.lstm_model import LSTMPredictor
 
 # Print API key status
 api_key = os.getenv("CYBOTRADE_API_KEY")
@@ -68,10 +69,14 @@ def parse_args():
                         help='Use market regime detection as a trading filter')
     parser.add_argument('--regime_states', type=int, default=2,
                         help='Number of market regimes to detect (default: 2)')
-    parser.add_argument('--model', type=str, default='hybrid', choices=['hmm', 'xgboost', 'hybrid'],
+    parser.add_argument('--model', type=str, default='hybrid', choices=['hmm', 'xgboost', 'lstm', 'hybrid'],
                         help='Model to use for prediction')
     parser.add_argument('--n_lags', type=int, default=2,
                         help='Number of lag features for XGBoost (default: 2)')
+    parser.add_argument('--window_size', type=int, default=30,
+                        help='Window size for LSTM model (default: 30)')
+    parser.add_argument('--use_lstm', action='store_true',
+                        help='Include LSTM model in hybrid approach')
     
     return parser.parse_args()
 
@@ -228,9 +233,18 @@ def train_model(data, args):
             print(f"Training new XGBoost model with {args.n_lags} lags")
             model = XGBoostPredictor(n_lags=args.n_lags)
             model.fit(train_data)
+        elif args.model == 'lstm':
+            print(f"Training new LSTM model with window size {args.window_size}")
+            model = LSTMPredictor(window_size=args.window_size)
+            model.fit(train_data)
         elif args.model == 'hybrid':
-            print(f"Training new Hybrid model with {args.states} HMM states and {args.n_lags} XGBoost lags")
-            model = HybridTradingModel(n_states=args.states, n_lags=args.n_lags)
+            print(f"Training new Hybrid model with {args.states} HMM states, {args.n_lags} XGBoost lags, and LSTM with window size {args.window_size}")
+            model = HybridTradingModel(
+                n_states=args.states, 
+                n_lags=args.n_lags,
+                window_size=args.window_size,
+                use_lstm=args.use_lstm
+            )
             model.fit(train_data)
         else:
             raise ValueError(f"Unknown model type: {args.model}")
@@ -290,6 +304,19 @@ def run_backtest(model, data, args):
             fee=TRADING_FEE,
             allow_shorts=not args.no_shorts
         )
+    elif args.model == 'lstm':
+        # Generate predictions and signals
+        predictions = model.predict(data, price_col=price_col)
+        signals = model.generate_trading_signals(predictions)
+        
+        # Use the HMM backtesting logic
+        dummy_hmm = MarketHMM()
+        results, performance = dummy_hmm.backtest_strategy(
+            signals,
+            price_col=price_col,
+            fee=TRADING_FEE,
+            allow_shorts=not args.no_shorts
+        )
     elif args.model == 'hybrid':
         # Generate combined predictions
         combined = model.predict(data, price_col=price_col, threshold=args.threshold)
@@ -317,6 +344,8 @@ def run_backtest(model, data, args):
         
         # Generate model-specific visualizations
         if args.model == 'xgboost':
+            model.plot_predictions(results, price_col=price_col)
+        elif args.model == 'lstm':
             model.plot_predictions(results, price_col=price_col)
         elif args.model == 'hybrid':
             model.plot_signals(results, price_col=price_col)
