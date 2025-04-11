@@ -10,6 +10,9 @@ import matplotlib.dates as mdates
 from matplotlib.ticker import FuncFormatter
 import seaborn as sns
 from datetime import datetime, timedelta
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.express as px
 
 from src.config import RESULTS_DIR
 
@@ -253,26 +256,33 @@ def plot_portfolio_growth(results, title='Portfolio Growth', save_path=None):
     return fig
 
 
-def create_performance_dashboard(results, performance, crypto='BTC', save_dir=None):
+def create_performance_dashboard(results, performance, crypto='BTC'):
     """
-    Create a complete performance dashboard with multiple plots.
+    Create a comprehensive performance dashboard with both Matplotlib and Plotly visualizations.
     
     Args:
         results (pd.DataFrame): DataFrame with trading results
         performance (dict): Dictionary with performance metrics
         crypto (str): Cryptocurrency symbol
-        save_dir (str): Directory to save the figures
+        
+    Returns:
+        str: Path to the dashboard directory
     """
-    # Create save directory if needed
-    if save_dir is None:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        save_dir = os.path.join(RESULTS_DIR, f"{crypto}_dashboard_{timestamp}")
+    # Create save directory
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    save_dir = os.path.join(RESULTS_DIR, f"{crypto}_results_{timestamp}")
     
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     
+    # Create and save static plots with Matplotlib
     # Plot price and states
-    if 'state' in results.columns:
+    if 'hmm_state' in results.columns:
+        state_column = 'hmm_state'
+        # Backward compatibility with 'state' column
+        if 'state' not in results.columns:
+            results['state'] = results[state_column]
+            
         price_states_path = os.path.join(save_dir, f"{crypto}_price_states.png")
         plot_price_and_states(results, title=f'{crypto} Price and HMM States', save_path=price_states_path)
     
@@ -290,11 +300,14 @@ def create_performance_dashboard(results, performance, crypto='BTC', save_dir=No
     metrics_path = os.path.join(save_dir, f"{crypto}_metrics.png")
     plot_performance_metrics(performance, title=f'{crypto} Performance Metrics', save_path=metrics_path)
     
-    print(f"Dashboard saved to {save_dir}")
-    
     # Create an HTML report
     html_path = os.path.join(save_dir, f"{crypto}_report.html")
     create_html_report(results, performance, crypto, save_dir, html_path)
+    
+    print(f"Matplotlib dashboard saved to {save_dir}")
+    
+    # Create and save interactive Plotly visualizations
+    create_plotly_trading_dashboard(results, performance, crypto, save_dir)
     
     return save_dir
 
@@ -432,4 +445,317 @@ def create_html_report(results, performance, crypto, img_dir, output_path):
         f.write(html_content)
     
     print(f"HTML report created at {output_path}")
-    return output_path 
+    return output_path
+
+
+def create_plotly_trading_dashboard(results, performance, crypto='BTC', save_dir=None):
+    """
+    Create an interactive Plotly dashboard showing trading signals and performance.
+    
+    Args:
+        results (pd.DataFrame): DataFrame with trading results
+        performance (dict): Dictionary with performance metrics
+        crypto (str): Cryptocurrency symbol
+        save_dir (str): Directory to save the HTML file
+        
+    Returns:
+        str: Path to the saved HTML file
+    """
+    if save_dir is None:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        save_dir = os.path.join(RESULTS_DIR, f"{crypto}_dashboard_{timestamp}")
+        
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    # Create main price and signals chart
+    price_signals_fig = create_plotly_price_signals(results, crypto)
+    
+    # Create portfolio performance chart
+    portfolio_fig = create_plotly_portfolio_growth(results, crypto)
+    
+    # Create performance metrics chart
+    metrics_fig = create_plotly_performance_metrics(performance)
+    
+    # Save the figures as HTML
+    price_signals_path = os.path.join(save_dir, f"{crypto}_price_signals.html")
+    portfolio_path = os.path.join(save_dir, f"{crypto}_portfolio.html")
+    metrics_path = os.path.join(save_dir, f"{crypto}_metrics.html")
+    
+    price_signals_fig.write_html(price_signals_path)
+    portfolio_fig.write_html(portfolio_path)
+    metrics_fig.write_html(metrics_path)
+    
+    print(f"Plotly dashboard created in {save_dir}")
+    
+    return save_dir
+
+
+def create_plotly_price_signals(results, crypto='BTC'):
+    """
+    Create an interactive Plotly chart showing price movement and trading signals.
+    
+    Args:
+        results (pd.DataFrame): DataFrame with trading results
+        crypto (str): Cryptocurrency symbol
+        
+    Returns:
+        plotly.graph_objects.Figure: Plotly figure
+    """
+    # Check if required columns exist
+    required_cols = ['date', 'signal', 'hmm_state']
+    price_col = None
+    
+    if 'price' in results.columns:
+        price_col = 'price'
+    elif 'close' in results.columns:
+        price_col = 'close'
+    
+    if price_col is None or not all(col in results.columns for col in required_cols):
+        print("Warning: Required columns missing for plotting")
+        return None
+    
+    # Create figure with secondary y-axis
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    # Add price line
+    fig.add_trace(
+        go.Scatter(
+            x=results['date'],
+            y=results[price_col],
+            mode='lines',
+            name=f'{crypto} Price',
+            line=dict(color='royalblue', width=1.5)
+        )
+    )
+    
+    # Add buy signals
+    buy_signals = results[results['signal'] == 1]
+    if not buy_signals.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=buy_signals['date'],
+                y=buy_signals[price_col],
+                mode='markers',
+                name='Buy Signal',
+                marker=dict(
+                    color='green',
+                    size=10,
+                    symbol='triangle-up',
+                    line=dict(color='darkgreen', width=1)
+                )
+            )
+        )
+    
+    # Add sell signals
+    sell_signals = results[results['signal'] == -1]
+    if not sell_signals.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=sell_signals['date'],
+                y=sell_signals[price_col],
+                mode='markers',
+                name='Sell Signal',
+                marker=dict(
+                    color='red',
+                    size=10,
+                    symbol='triangle-down',
+                    line=dict(color='darkred', width=1)
+                )
+            )
+        )
+    
+    # Add HMM states on secondary y-axis
+    fig.add_trace(
+        go.Scatter(
+            x=results['date'],
+            y=results['hmm_state'],
+            mode='lines',
+            name='HMM State',
+            line=dict(color='purple', width=1, dash='dot'),
+            opacity=0.7
+        ),
+        secondary_y=True
+    )
+    
+    # Set titles and labels
+    fig.update_layout(
+        title=f'{crypto} Price with HMM Trading Signals',
+        xaxis_title='Date',
+        yaxis_title=f'{crypto} Price (USD)',
+        template='plotly_dark',
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+    
+    # Set y-axes titles
+    fig.update_yaxes(title_text=f"{crypto} Price (USD)", secondary_y=False)
+    fig.update_yaxes(title_text="HMM State", secondary_y=True)
+    
+    return fig
+
+
+def create_plotly_portfolio_growth(results, crypto='BTC'):
+    """
+    Create an interactive Plotly chart showing portfolio growth.
+    
+    Args:
+        results (pd.DataFrame): DataFrame with trading results
+        crypto (str): Cryptocurrency symbol
+        
+    Returns:
+        plotly.graph_objects.Figure: Plotly figure
+    """
+    # Check if we need to calculate portfolio value
+    if 'portfolio_value' not in results.columns and 'strategy_value' in results.columns:
+        # Use strategy_value column instead
+        results = results.copy()
+        results['portfolio_value'] = results['strategy_value']
+    elif 'portfolio_value' not in results.columns and 'cumulative_returns' in results.columns:
+        # Calculate portfolio value from cumulative returns
+        results = results.copy()
+        initial_value = 10000  # Assume $10,000 starting capital
+        results['portfolio_value'] = initial_value * (1 + results['cumulative_returns'])
+    
+    if 'portfolio_value' not in results.columns:
+        print("Warning: portfolio_value column missing and cannot be calculated")
+        # Create a simple figure with a message
+        fig = go.Figure()
+        fig.add_annotation(
+            text="Portfolio value data not available",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=20)
+        )
+        fig.update_layout(title="Portfolio Growth - Data Missing")
+        return fig
+    
+    fig = go.Figure()
+    
+    # Add portfolio value line
+    fig.add_trace(
+        go.Scatter(
+            x=results['date'],
+            y=results['portfolio_value'],
+            mode='lines',
+            name='Strategy',
+            line=dict(color='green', width=2)
+        )
+    )
+    
+    # Add buy-and-hold line if available
+    if 'buy_hold_value' in results.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=results['date'],
+                y=results['buy_hold_value'],
+                mode='lines',
+                name='Buy & Hold',
+                line=dict(color='gray', width=1.5, dash='dash')
+            )
+        )
+    
+    # Add position information if available
+    if 'position' in results.columns:
+        # Get position change points
+        position_changes = results[results['position'].diff() != 0]
+        
+        # Add position annotations
+        for idx, row in position_changes.iterrows():
+            position_text = "LONG" if row['position'] > 0 else "SHORT" if row['position'] < 0 else "CASH"
+            position_color = "green" if row['position'] > 0 else "red" if row['position'] < 0 else "yellow"
+            
+            fig.add_annotation(
+                x=row['date'],
+                y=row['portfolio_value'],
+                text=position_text,
+                showarrow=True,
+                arrowhead=2,
+                arrowcolor=position_color,
+                arrowsize=1,
+                arrowwidth=1,
+                ax=0,
+                ay=-40
+            )
+    
+    # Set titles and layout
+    fig.update_layout(
+        title=f'{crypto} Trading Strategy Performance',
+        xaxis_title='Date',
+        yaxis_title='Portfolio Value (USD)',
+        template='plotly_dark',
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+    
+    # Format y-axis as currency
+    fig.update_yaxes(
+        tickprefix='$',
+        tickformat=',.2f'
+    )
+    
+    return fig
+
+
+def create_plotly_performance_metrics(performance):
+    """
+    Create an interactive Plotly chart showing performance metrics.
+    
+    Args:
+        performance (dict): Dictionary with performance metrics
+        
+    Returns:
+        plotly.graph_objects.Figure: Plotly figure
+    """
+    # Convert performance dict to DataFrame for plotting
+    metrics = {k: v for k, v in performance.items() if isinstance(v, (int, float))}
+    metrics_df = pd.DataFrame(list(metrics.items()), columns=['Metric', 'Value'])
+    
+    # Sort by absolute value (using pandas sort_values instead of argsort)
+    metrics_df = metrics_df.sort_values('Value', key=abs, ascending=False)
+    
+    # Create color map (green for positive, red for negative)
+    colors = ['green' if v > 0 else 'red' for v in metrics_df['Value']]
+    
+    # Create bar chart
+    fig = px.bar(
+        metrics_df,
+        y='Metric',
+        x='Value',
+        orientation='h',
+        color_discrete_sequence=colors,
+        labels={'Value': 'Value', 'Metric': ''},
+        title='Strategy Performance Metrics'
+    )
+    
+    # Add value labels
+    fig.update_traces(
+        texttemplate='%{x:.4f}',
+        textposition='outside'
+    )
+    
+    # Update layout
+    fig.update_layout(
+        template='plotly_dark',
+        xaxis_title='Value',
+        yaxis=dict(
+            categoryorder='total ascending'
+        ),
+        height=600,
+        margin=dict(l=200)
+    )
+    
+    return fig 

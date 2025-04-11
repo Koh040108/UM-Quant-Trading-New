@@ -17,7 +17,7 @@ from src.config import DATA_DIR
 def main():
     # Load sample data
     print("Loading data...")
-    market_data_file = os.path.join(DATA_DIR, "BTC_market_data_4h.csv")
+    market_data_file = os.path.join(DATA_DIR, "BTC_market_data_1h.csv")
     
     if not os.path.exists(market_data_file):
         print(f"Cannot find data file: {market_data_file}")

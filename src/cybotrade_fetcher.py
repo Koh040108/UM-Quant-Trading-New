@@ -132,42 +132,49 @@ def save_data(df, crypto, source, metric, interval=None):
     df.to_csv(file_path, index=False)
     print(f"Saved {len(df)} rows to {file_path}")
     
-    # If this is price data, also save it in the ccxt format for compatibility
+    # If this is price data, also save it in a standardized format for compatibility
     # Check various price-related metrics
     is_price_data = (
         (source == "glassnode" and metric in ["price", "market_price_usd_close", "ohlc"]) or
-        (source == "coinglass" and metric == "price")
+        (source == "coinglass" and metric == "price") or
+        metric.lower() in ["price", "market_price", "close_price", "usd_price"]
     )
     
     if is_price_data:
-        # Create a copy in ccxt format for the feature engineering module
-        ccxt_filename = f"{crypto}_ccxt_market_data_{interval}.csv"
-        ccxt_path = os.path.join(DATA_DIR, ccxt_filename)
+        # Create a standardized market price file
+        market_price_filename = f"{crypto}_market_price_{interval}.csv"
+        market_price_path = os.path.join(DATA_DIR, market_price_filename)
         
         # Clone and prepare dataframe
-        ccxt_df = df.copy()
+        market_price_df = df.copy()
         
         # Handle different data formats
-        if 'value' in ccxt_df.columns:
-            ccxt_df.rename(columns={'value': 'price'}, inplace=True)
-        elif 'close' in ccxt_df.columns:
-            ccxt_df.rename(columns={'close': 'price'}, inplace=True)
-        elif 'price' not in ccxt_df.columns and metric == 'ohlc':
+        if 'value' in market_price_df.columns:
+            market_price_df.rename(columns={'value': 'price'}, inplace=True)
+        elif 'close' in market_price_df.columns:
+            market_price_df.rename(columns={'close': 'price'}, inplace=True)
+        elif 'price' not in market_price_df.columns and metric == 'ohlc':
             # If this is OHLC data, create a price column from close
-            if 'o' in ccxt_df.columns and 'h' in ccxt_df.columns and 'l' in ccxt_df.columns and 'c' in ccxt_df.columns:
-                ccxt_df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close'}, inplace=True)
-                ccxt_df['price'] = ccxt_df['close']
+            if 'o' in market_price_df.columns and 'h' in market_price_df.columns and 'l' in market_price_df.columns and 'c' in market_price_df.columns:
+                market_price_df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close'}, inplace=True)
+                market_price_df['price'] = market_price_df['close']
             
         # Add volume column if it doesn't exist
-        if 'volume' not in ccxt_df.columns:
-            ccxt_df['volume'] = ccxt_df['price'] * 0.1 if 'price' in ccxt_df.columns else 100
+        if 'volume' not in market_price_df.columns:
+            market_price_df['volume'] = market_price_df['price'] * 0.1 if 'price' in market_price_df.columns else 100
         
         # Ensure we have a date column
-        if 'date' not in ccxt_df.columns and 'timestamp' in ccxt_df.columns:
-            ccxt_df['date'] = pd.to_datetime(ccxt_df['timestamp'], unit='ms')
+        if 'date' not in market_price_df.columns and 'timestamp' in market_price_df.columns:
+            market_price_df['date'] = pd.to_datetime(market_price_df['timestamp'], unit='ms')
             
-        # Save the ccxt compatible file
-        ccxt_df.to_csv(ccxt_path, index=False)
+        # Save the standardized price file
+        market_price_df.to_csv(market_price_path, index=False)
+        print(f"Created standardized market price data: {market_price_path}")
+        
+        # Also create the CCXT compatible file
+        ccxt_filename = f"{crypto}_ccxt_market_data_{interval}.csv"
+        ccxt_path = os.path.join(DATA_DIR, ccxt_filename)
+        market_price_df.to_csv(ccxt_path, index=False)
         print(f"Created ccxt-compatible price data: {ccxt_path}")
     
     return file_path
@@ -190,7 +197,7 @@ async def fetch_and_save_data_async(crypto, start_date, end_date, interval, api_
     topics = [
         # Price data is most critical
         f"cryptoquant|btc/inter-entity-flows/miner-to-miner?from_miner=f2pool&to_miner=all_miner&window=hour",
-        f"cryptoquant|btc/fund-data/market-price-usd?symbol=gbtc&window=hour",
+        f"cryptoquant|btc/fund-data/market-price-usd?symbol=gbtc&window=day",
         f"cryptoquant|btc/flow-indicator/exchange-whale-ratio?exchange=binance&window=hour",
         f"cryptoquant|btc/exchange-flows/inflow?exchange=binance&window=hour",
         f"cryptoquant|btc/exchange-flows/outflow?exchange=binance&window=hour",
@@ -288,10 +295,13 @@ def fetch_all_data(cryptos=None, start_date=None, end_date=None, interval=DEFAUL
 async def create_price_data_if_missing(crypto, start_date, end_date, interval):
     """Create basic price data if none was fetched from API."""
     # Check if we already have price data
+    market_price_filename = f"{crypto}_market_price_{interval}.csv"
+    market_price_path = os.path.join(DATA_DIR, market_price_filename)
+    
     ccxt_filename = f"{crypto}_ccxt_market_data_{interval}.csv"
     ccxt_path = os.path.join(DATA_DIR, ccxt_filename)
     
-    if not os.path.exists(ccxt_path):
+    if not os.path.exists(market_price_path) and not os.path.exists(ccxt_path):
         print(f"No price data found for {crypto}. Creating synthetic price data for basic functionality.")
         
         # Parse dates
@@ -300,9 +310,9 @@ async def create_price_data_if_missing(crypto, start_date, end_date, interval):
         
         # Generate date range based on interval
         if interval == '1h':
-            date_range = pd.date_range(start=start, end=end, freq='1H')
+            date_range = pd.date_range(start=start, end=end, freq='1h')
         elif interval == '4h':
-            date_range = pd.date_range(start=start, end=end, freq='4H')
+            date_range = pd.date_range(start=start, end=end, freq='4h')
         else:  # Default to daily
             date_range = pd.date_range(start=start, end=end, freq='D')
         
@@ -320,8 +330,13 @@ async def create_price_data_if_missing(crypto, start_date, end_date, interval):
             'volume': volumes
         })
         
+        # Save in standard market price format 
+        df.to_csv(market_price_path, index=False)
+        print(f"Created basic price data with {len(df)} records: {market_price_path}")
+        
+        # Also save in ccxt format for compatibility
         df.to_csv(ccxt_path, index=False)
-        print(f"Created basic price data with {len(df)} records: {ccxt_path}")
+        print(f"Created ccxt-compatible price data: {ccxt_path}")
         
         # Also save in glassnode format
         glassnode_df = df[['date', 'price']].rename(columns={'price': 'value'})
@@ -344,7 +359,7 @@ if __name__ == "__main__":
     
     start_date = "2024-01-01"
     end_date = "2024-03-14"
-    interval = "4h"
+    interval = "1h"
     
     print(f"Fetching data from {start_date} to {end_date} with interval {interval}...")
     print(f"Using API key: {api_key[:5]}...{api_key[-5:]}")

@@ -53,31 +53,49 @@ class MarketHMM:
             np.array: Prepared features
         """
         if feature_columns is None:
-            # Default to using price changes and volatility
-            feature_columns = ['price_change_1d', 'volatility_7d']
+            # Check for ROC features first
+            roc_columns = [col for col in df.columns if col.startswith('roc_')]
+            if roc_columns:
+                # If ROC features are available, use them
+                feature_columns = roc_columns
+                print(f"Using ROC features: {feature_columns}")
+            else:
+                # Default to using price changes and volatility
+                feature_columns = ['price_change_1d', 'volatility_7d']
             
             # Check if columns exist in the DataFrame
             available_columns = [col for col in feature_columns if col in df.columns]
             
             if not available_columns:
-                # Fallback to using close price
+                # Fallback to using close or price column
+                price_col = None
                 if 'close' in df.columns:
+                    price_col = 'close'
+                elif 'price' in df.columns:
+                    price_col = 'price'
+                
+                if price_col:
                     # Calculate returns
-                    returns = df['close'].pct_change().fillna(0)
+                    returns = df[price_col].pct_change().fillna(0)
                     # Calculate volatility
                     volatility = returns.rolling(window=7).std().fillna(0)
+                    # Calculate ROC
+                    roc = df[price_col].pct_change(periods=10).fillna(0) * 100
                     
                     # Create a new DataFrame with these features
                     tmp_df = pd.DataFrame({
                         'returns': returns,
-                        'volatility': volatility
+                        'volatility': volatility,
+                        'roc': roc
                     })
                     
                     # Scale the features
                     X = self.scaler.fit_transform(tmp_df)
                     return X
                 else:
-                    raise ValueError("Required columns not found in DataFrame")
+                    # Print available columns to help debug
+                    print(f"Available columns: {df.columns.tolist()}")
+                    raise ValueError("Required columns not found in DataFrame. Need either 'price_change_1d' and 'volatility_7d', or 'close'/'price' column.")
             
             # Use available columns
             feature_columns = available_columns
@@ -198,6 +216,18 @@ class MarketHMM:
         if 'hmm_state' not in df.columns:
             raise ValueError("DataFrame does not contain hmm_state column")
         
+        # Use price column if close is not available
+        if price_col not in df.columns:
+            if 'price' in df.columns:
+                print(f"Using 'price' column instead of '{price_col}' for state analysis")
+                price_col = 'price'
+            elif 'value' in df.columns:
+                print(f"Using 'value' column instead of '{price_col}' for state analysis")
+                price_col = 'value'
+            else:
+                print(f"Available columns: {df.columns.tolist()}")
+                raise ValueError(f"Required price column '{price_col}' not found in DataFrame")
+        
         # Calculate returns
         df['returns'] = df[price_col].pct_change()
         
@@ -253,125 +283,264 @@ class MarketHMM:
     
     def generate_trading_signals(self, df, threshold=0.0, price_col='close'):
         """
-        Generate trading signals based on the HMM states.
+        Generate trading signals based on HMM states.
         
         Args:
             df (pd.DataFrame): DataFrame with features and hmm_state column
-            threshold (float): Return threshold for selecting profitable states
+            threshold (float): Return threshold for profitable states
             price_col (str): Column name for price
             
         Returns:
-            pd.DataFrame: DataFrame with added trading signals
+            pd.DataFrame: DataFrame with added signal column
         """
         if 'hmm_state' not in df.columns:
-            df = self.add_states_to_df(df)
+            raise ValueError("DataFrame does not contain hmm_state column")
+        
+        # Use price column if close is not available
+        if price_col not in df.columns:
+            if 'price' in df.columns:
+                print(f"Using 'price' column instead of '{price_col}' for signal generation")
+                price_col = 'price'
+            elif 'value' in df.columns:
+                print(f"Using 'value' column instead of '{price_col}' for signal generation")
+                price_col = 'value'
+            else:
+                print(f"Available columns: {df.columns.tolist()}")
+                raise ValueError(f"Required price column '{price_col}' not found in DataFrame")
+        
+        # Create a copy to avoid modifying the original
+        result = df.copy()
         
         # Calculate returns
-        df['returns'] = df[price_col].pct_change()
+        result['returns'] = result[price_col].pct_change()
         
-        # Analyze state characteristics
-        state_analysis, _, _ = self.analyze_states(df, price_col)
+        # Compute state characteristics based on historical returns
+        state_returns = {}
+        state_sharpe = {}
+        state_volatility = {}
         
-        # Identify profitable states (positive expected return)
-        profitable_states = state_analysis[('returns', 'mean')].where(
-            state_analysis[('returns', 'mean')] > threshold
-        ).dropna().index.tolist()
+        for state in range(self.n_states):
+            state_data = result[result['hmm_state'] == state]
+            mean_return = state_data['returns'].mean()
+            std_return = state_data['returns'].std()
+            
+            state_returns[state] = mean_return
+            state_volatility[state] = std_return
+            
+            # Calculate Sharpe ratio (using 0 as risk-free rate for simplicity)
+            if std_return > 0:
+                sharpe = mean_return / std_return
+            else:
+                sharpe = 0
+                
+            state_sharpe[state] = sharpe
         
-        # Generate signals: 1 for buy, -1 for sell, 0 for hold
-        df['signal'] = 0
-        df['signal'] = df['hmm_state'].apply(lambda x: 1 if x in profitable_states else -1)
+        # Dynamically identify states based on characteristics
+        bullish_state = max(state_sharpe, key=state_sharpe.get)
+        bearish_state = min(state_sharpe, key=state_sharpe.get)
         
-        # Generate positions (1 for long, -1 for short, 0 for flat)
-        df['position'] = df['signal'].shift(1)
-        df['position'].fillna(0, inplace=True)
-        df['position'] = df['position'].astype(int)
+        # Any state with sharpe below threshold is neutral
+        neutral_states = [state for state, sharpe in state_sharpe.items() 
+                         if abs(sharpe) < threshold and state != bullish_state and state != bearish_state]
         
-        return df
+        print(f"\nState Classification:")
+        print(f"Bullish State: {bullish_state} (Sharpe: {state_sharpe[bullish_state]:.4f}, Return: {state_returns[bullish_state]:.4f})")
+        print(f"Bearish State: {bearish_state} (Sharpe: {state_sharpe[bearish_state]:.4f}, Return: {state_returns[bearish_state]:.4f})")
+        print(f"Neutral States: {neutral_states}")
+        
+        # Define a function to map states to signals
+        def get_signal(state):
+            if state == bullish_state and state_returns[state] > threshold:
+                return 1  # Buy signal
+            elif state == bearish_state and state_returns[state] < -threshold:
+                return -1  # Sell signal
+            else:
+                return 0  # Neutral
+        
+        # Apply the function to create signals
+        result['signal'] = result['hmm_state'].apply(get_signal)
+        
+        # Calculate signal statistics
+        buy_signals = (result['signal'] == 1).sum()
+        sell_signals = (result['signal'] == -1).sum()
+        neutral_signals = (result['signal'] == 0).sum()
+        total_signals = len(result)
+        
+        print(f"\nSignal Statistics:")
+        print(f"Buy Signals: {buy_signals} ({buy_signals/total_signals:.2%} of data)")
+        print(f"Sell Signals: {sell_signals} ({sell_signals/total_signals:.2%} of data)")
+        print(f"Neutral Signals: {neutral_signals} ({neutral_signals/total_signals:.2%} of data)")
+        
+        return result
     
-    def backtest_strategy(self, df, price_col='close', fee=TRADING_FEE):
+    def backtest_strategy(self, df, price_col='close', fee=TRADING_FEE, allow_shorts=True):
         """
-        Backtest the HMM-based trading strategy.
+        Backtest the HMM trading strategy.
         
         Args:
-            df (pd.DataFrame): DataFrame with features, signals, and positions
+            df (pd.DataFrame): DataFrame with signal column
             price_col (str): Column name for price
-            fee (float): Trading fee as a decimal (e.g., 0.001 for 0.1%)
+            fee (float): Trading fee as a percentage
+            allow_shorts (bool): Whether to allow short selling
             
         Returns:
-            tuple: (returns_df, performance_metrics)
+            tuple: (results_df, performance_metrics)
         """
-        if 'position' not in df.columns:
-            raise ValueError("DataFrame does not contain position column")
+        if 'signal' not in df.columns:
+            raise ValueError("DataFrame does not contain signal column")
         
-        # Calculate price returns
-        df['price_returns'] = df[price_col].pct_change()
+        # Use price column if close is not available
+        if price_col not in df.columns:
+            if 'price' in df.columns:
+                print(f"Using 'price' column instead of '{price_col}' for backtesting")
+                price_col = 'price'
+            elif 'value' in df.columns:
+                print(f"Using 'value' column instead of '{price_col}' for backtesting")
+                price_col = 'value'
+            else:
+                print(f"Available columns: {df.columns.tolist()}")
+                raise ValueError(f"Required price column '{price_col}' not found in DataFrame")
         
-        # Calculate strategy returns (without fees)
-        df['strategy_returns_no_fee'] = df['price_returns'] * df['position']
+        # Make a copy of the dataframe to avoid modifying the original
+        results = df.copy()
         
-        # Calculate trading costs
-        df['trade'] = df['position'].diff().fillna(0) != 0
-        df['fee_cost'] = df['trade'].astype(int) * fee
+        # Get price data
+        price = results[price_col]
         
-        # Calculate strategy returns (with fees)
-        df['strategy_returns'] = df['strategy_returns_no_fee'] - df['fee_cost']
+        # Calculate returns
+        returns = price.pct_change().fillna(0)
+        
+        # Initialize strategy columns
+        results['returns'] = returns
+        results['strategy_position'] = 0
+        results['strategy_returns'] = 0
+        results['buy_hold_returns'] = returns
+        results['strategy_cumulative'] = 0
+        results['buy_hold_cumulative'] = 0
+        
+        # Get position changes based on signals
+        position = 0
+        positions = []
+        trades = 0
+        buy_trades = 0
+        sell_trades = 0
+        
+        for i, row in results.iterrows():
+            signal = row['signal']
+            
+            # Skip the first row to avoid NaN returns
+            if i == results.index[0]:
+                positions.append(0)
+                continue
+                
+            # Determine position change based on signal
+            if signal == 1 and position <= 0:  # Buy signal when not long
+                prev_position = position
+                position = 1
+                trades += 1
+                buy_trades += 1
+                if prev_position < 0:  # If we were short, count closing the short as a trade
+                    trades += 1
+            elif signal == -1 and position >= 0 and allow_shorts:  # Sell signal when not short
+                prev_position = position
+                position = -1
+                trades += 1
+                sell_trades += 1
+                if prev_position > 0:  # If we were long, count closing the long as a trade
+                    trades += 1
+            elif signal == 0 and position != 0:  # Neutral signal when in a position
+                position = 0
+                trades += 1
+            
+            positions.append(position)
+        
+        # Replace the first position with the second position to handle initialization
+        if len(positions) > 1:
+            positions[0] = positions[1]
+            
+        results['strategy_position'] = positions
+        
+        # Calculate strategy returns with fees
+        for i in range(1, len(results)):
+            # Check if we made a trade
+            if results['strategy_position'].iloc[i] != results['strategy_position'].iloc[i-1]:
+                # Apply fee
+                position_change = results['strategy_position'].iloc[i] - results['strategy_position'].iloc[i-1]
+                # Absolute value of position change determines the fee
+                fee_amount = fee * abs(position_change)
+                results.loc[results.index[i], 'strategy_returns'] = returns.iloc[i] * results['strategy_position'].iloc[i] - fee_amount
+            else:
+                # No fee if no position change
+                results.loc[results.index[i], 'strategy_returns'] = returns.iloc[i] * results['strategy_position'].iloc[i]
         
         # Calculate cumulative returns
-        df['cum_price_returns'] = (1 + df['price_returns']).cumprod() - 1
-        df['cum_strategy_returns'] = (1 + df['strategy_returns']).cumprod() - 1
-        
-        # Calculate drawdowns
-        df['price_peak'] = df['cum_price_returns'].cummax()
-        df['strategy_peak'] = df['cum_strategy_returns'].cummax()
-        df['price_drawdown'] = (df['cum_price_returns'] - df['price_peak']) / (1 + df['price_peak'])
-        df['strategy_drawdown'] = (df['cum_strategy_returns'] - df['strategy_peak']) / (1 + df['strategy_peak'])
+        results['strategy_cumulative'] = (1 + results['strategy_returns']).cumprod() - 1
+        results['buy_hold_cumulative'] = (1 + results['buy_hold_returns']).cumprod() - 1
         
         # Calculate performance metrics
-        total_trades = df['trade'].sum()
-        win_trades = ((df['strategy_returns'] > 0) & df['trade']).sum()
-        loss_trades = ((df['strategy_returns'] < 0) & df['trade']).sum()
-        win_rate = win_trades / total_trades if total_trades > 0 else 0
+        total_days = len(results)
+        trading_days_per_year = 365
+        years = total_days / trading_days_per_year
         
-        # Trading frequency
-        trading_frequency = total_trades / len(df)
+        # Calculate key metrics
+        total_return = results['strategy_cumulative'].iloc[-1]
+        buy_hold_return = results['buy_hold_cumulative'].iloc[-1]
         
-        # Annualized metrics (assuming daily data)
-        trading_days = 252
-        days = len(df)
-        annual_factor = trading_days / days
+        annualized_return = (1 + total_return) ** (1 / years) - 1
+        annualized_buy_hold_return = (1 + buy_hold_return) ** (1 / years) - 1
         
-        total_return = df['cum_strategy_returns'].iloc[-1]
-        annualized_return = (1 + total_return) ** annual_factor - 1
+        # Calculate volatility
+        daily_std = results['strategy_returns'].std()
+        annualized_std = daily_std * (trading_days_per_year ** 0.5)
         
-        # Risk metrics
-        volatility = df['strategy_returns'].std() * np.sqrt(trading_days)
-        sharpe_ratio = annualized_return / volatility if volatility > 0 else 0
-        max_drawdown = df['strategy_drawdown'].min()
+        buy_hold_daily_std = results['buy_hold_returns'].std()
+        buy_hold_annualized_std = buy_hold_daily_std * (trading_days_per_year ** 0.5)
         
-        # Create a buy-hold comparison
-        buy_hold_return = df['cum_price_returns'].iloc[-1]
-        buy_hold_annualized = (1 + buy_hold_return) ** annual_factor - 1
-        buy_hold_volatility = df['price_returns'].std() * np.sqrt(trading_days)
-        buy_hold_sharpe = buy_hold_annualized / buy_hold_volatility if buy_hold_volatility > 0 else 0
-        buy_hold_max_drawdown = df['price_drawdown'].min()
+        # Calculate Sharpe Ratio (assuming risk-free rate = 0 for simplicity)
+        sharpe_ratio = annualized_return / annualized_std if annualized_std > 0 else 0
+        buy_hold_sharpe = annualized_buy_hold_return / buy_hold_annualized_std if buy_hold_annualized_std > 0 else 0
+        
+        # Calculate drawdown
+        peak = results['strategy_cumulative'].cummax()
+        drawdown = (results['strategy_cumulative'] - peak) / peak
+        max_drawdown = drawdown.min()
+        
+        # Calculate win rate
+        strategy_wins = (results['strategy_returns'] > 0).sum()
+        win_rate = strategy_wins / total_days if total_days > 0 else 0
+        
+        # Calculate trade frequency
+        trade_frequency = trades / total_days
+        
+        # Long vs short performance
+        long_returns = results[results['strategy_position'] > 0]['strategy_returns']
+        short_returns = results[results['strategy_position'] < 0]['strategy_returns']
+        neutral_returns = results[results['strategy_position'] == 0]['strategy_returns']
+        
+        long_win_rate = (long_returns > 0).sum() / len(long_returns) if len(long_returns) > 0 else 0
+        short_win_rate = (short_returns > 0).sum() / len(short_returns) if len(short_returns) > 0 else 0
         
         # Compile performance metrics
         performance = {
             'Total Return': total_return,
             'Annualized Return': annualized_return,
-            'Volatility': volatility,
+            'Volatility': annualized_std,
             'Sharpe Ratio': sharpe_ratio,
             'Max Drawdown': max_drawdown,
-            'Total Trades': total_trades,
             'Win Rate': win_rate,
-            'Trading Frequency': trading_frequency,
+            'Trades': trades,
+            'Buy Trades': buy_trades,
+            'Sell Trades': sell_trades,
+            'Trading Frequency': trade_frequency,
+            'Long Win Rate': long_win_rate,
+            'Short Win Rate': short_win_rate,
             'Buy Hold Return': buy_hold_return,
-            'Buy Hold Annualized': buy_hold_annualized,
-            'Buy Hold Sharpe': buy_hold_sharpe,
-            'Buy Hold Max Drawdown': buy_hold_max_drawdown
+            'Buy Hold Annualized Return': annualized_buy_hold_return,
+            'Buy Hold Volatility': buy_hold_annualized_std,
+            'Buy Hold Sharpe': buy_hold_sharpe
         }
         
-        return df, performance
+        return results, performance
     
     def plot_states_and_returns(self, df, price_col='close'):
         """
@@ -384,44 +553,43 @@ class MarketHMM:
         if 'hmm_state' not in df.columns:
             raise ValueError("DataFrame does not contain hmm_state column")
         
+        # Use price column if close is not available
+        if price_col not in df.columns:
+            if 'price' in df.columns:
+                print(f"Using 'price' column instead of '{price_col}' for plotting")
+                price_col = 'price'
+            elif 'value' in df.columns:
+                print(f"Using 'value' column instead of '{price_col}' for plotting")
+                price_col = 'value'
+            else:
+                print(f"Available columns: {df.columns.tolist()}")
+                raise ValueError(f"Required price column '{price_col}' not found in DataFrame")
+        
         # Create a figure with subplots
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(15, 12), sharex=True)
         
         # Plot price
-        ax1.plot(df.index, df[price_col], label='Price')
-        ax1.set_title('Price and HMM States')
-        ax1.set_ylabel('Price')
+        ax1.plot(df['date'], df[price_col], label=price_col.capitalize())
+        ax1.set_title(f'{price_col.capitalize()} Price and Hidden States')
+        ax1.set_ylabel(f'{price_col.capitalize()} Price')
+        ax1.legend()
         ax1.grid(True)
         
-        # Plot hidden states
-        ax2.plot(df.index, df['hmm_state'], label='Hidden State', marker='o', markersize=3, linestyle='-')
-        ax2.set_ylabel('State')
+        # Plot states
+        scatter = ax2.scatter(df['date'], df[price_col], c=df['hmm_state'], cmap='viridis', 
+                             label='Hidden States', s=30, alpha=0.6)
+        ax2.set_ylabel(f'{price_col.capitalize()} Price')
+        legend1 = ax2.legend(*scatter.legend_elements(), title="States")
+        ax2.add_artist(legend1)
         ax2.grid(True)
         
-        # Highlight different regions with different colors
-        states = df['hmm_state'].unique()
-        colors = plt.cm.tab10(np.linspace(0, 1, len(states)))
-        
-        for i, state in enumerate(states):
-            mask = df['hmm_state'] == state
-            ax2.fill_between(df.index, 0, 1, where=mask, transform=ax2.get_xaxis_transform(), 
-                             color=colors[i], alpha=0.3, label=f'State {state}')
-        
-        ax2.legend(loc='upper right')
-        
-        # Plot returns or cumulative returns
-        if 'cum_strategy_returns' in df.columns:
-            ax3.plot(df.index, df['cum_price_returns'], label='Buy & Hold', color='blue')
-            ax3.plot(df.index, df['cum_strategy_returns'], label='HMM Strategy', color='green')
-            ax3.set_ylabel('Cumulative Returns')
-            ax3.set_title('Strategy Performance')
-        else:
-            ax3.plot(df.index, df['returns'], label='Returns', color='blue')
-            ax3.set_ylabel('Returns')
-            ax3.set_title('Daily Returns')
-        
+        # Plot returns
+        ax3.plot(df['date'], df['returns'] * 100, label='Daily Returns %', color='blue')
+        ax3.set_title('Daily Returns')
+        ax3.set_ylabel('Returns (%)')
+        ax3.set_xlabel('Date')
+        ax3.legend()
         ax3.grid(True)
-        ax3.legend(loc='upper left')
         
         plt.tight_layout()
         plt.show()

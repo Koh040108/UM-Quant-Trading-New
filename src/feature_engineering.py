@@ -121,29 +121,40 @@ class FeatureEngineer:
         """
         result = df.copy()
         
-        # Ensure we have a 'close' column
-        if 'close' not in result.columns:
+        # Determine which price column to use
+        price_col = None
+        if 'close' in result.columns:
+            price_col = 'close'
+        elif 'price' in result.columns:
+            price_col = 'price'
+        else:
+            print("Warning: No price or close column found. Cannot create price-based features.")
             return result
         
         # Price momentum features
-        result['price_change_1d'] = result['close'].pct_change(1)
-        result['price_change_3d'] = result['close'].pct_change(3)
-        result['price_change_7d'] = result['close'].pct_change(7)
+        result['price_change_1d'] = result[price_col].pct_change(1)
+        result['price_change_3d'] = result[price_col].pct_change(3)
+        result['price_change_7d'] = result[price_col].pct_change(7)
+        
+        # Add Rate of Change (ROC) for different time periods
+        result['roc_5'] = self.calculate_roc(result[price_col], window=5)
+        result['roc_10'] = self.calculate_roc(result[price_col], window=10)
+        result['roc_20'] = self.calculate_roc(result[price_col], window=20)
         
         # Rolling statistics
-        result['close_7d_mean'] = result['close'].rolling(window=7).mean()
-        result['close_7d_std'] = result['close'].rolling(window=7).std()
-        result['close_7d_max'] = result['close'].rolling(window=7).max()
-        result['close_7d_min'] = result['close'].rolling(window=7).min()
+        result[f'{price_col}_7d_mean'] = result[price_col].rolling(window=7).mean()
+        result[f'{price_col}_7d_std'] = result[price_col].rolling(window=7).std()
+        result[f'{price_col}_7d_max'] = result[price_col].rolling(window=7).max()
+        result[f'{price_col}_7d_min'] = result[price_col].rolling(window=7).min()
         
         # Volatility features
-        result['volatility_7d'] = result['close'].pct_change().rolling(window=7).std()
-        result['volatility_14d'] = result['close'].pct_change().rolling(window=14).std()
-        result['volatility_30d'] = result['close'].pct_change().rolling(window=30).std()
+        result['volatility_7d'] = result[price_col].pct_change().rolling(window=7).std()
+        result['volatility_14d'] = result[price_col].pct_change().rolling(window=14).std()
+        result['volatility_30d'] = result[price_col].pct_change().rolling(window=30).std()
         
         # High-Low Range
         if all(col in result.columns for col in ['high', 'low']):
-            result['daily_range'] = (result['high'] - result['low']) / result['close']
+            result['daily_range'] = (result['high'] - result['low']) / result[price_col]
             result['daily_range_7d_mean'] = result['daily_range'].rolling(window=7).mean()
         
         # Volume features
@@ -151,20 +162,34 @@ class FeatureEngineer:
             result['volume_change_1d'] = result['volume'].pct_change(1)
             result['volume_change_7d'] = result['volume'].pct_change(7)
             result['volume_7d_mean'] = result['volume'].rolling(window=7).mean()
-            result['volume_close_ratio'] = result['volume'] / result['close']
+            result['volume_close_ratio'] = result['volume'] / result[price_col]
         
         # Lagged features for time series modeling
         for lag in range(1, lookback_window + 1):
-            result[f'close_lag_{lag}'] = result['close'].shift(lag)
+            result[f'{price_col}_lag_{lag}'] = result[price_col].shift(lag)
             
             if 'volume' in result.columns:
                 result[f'volume_lag_{lag}'] = result['volume'].shift(lag)
         
         # Fill NaN values created by the calculations
-        result.fillna(method='bfill', inplace=True)
+        result.fillna(method='ffill', inplace=True)
         result.fillna(0, inplace=True)
         
         return result
+    
+    def calculate_roc(self, series, window=10):
+        """Calculate Rate of Change (ROC) for a given series.
+        
+        Args:
+            series (pd.Series): Price or other value series
+            window (int): Lookback period for ROC calculation
+            
+        Returns:
+            pd.Series: Rate of Change values
+        """
+        # Calculate percentage change over the specified window
+        roc = series.pct_change(periods=window) * 100
+        return roc
     
     def add_on_chain_features(self, price_df, onchain_dfs):
         """
@@ -182,30 +207,72 @@ class FeatureEngineer:
         # Ensure we have a date column for merging
         if 'date' not in result.columns and 'timestamp' in result.columns:
             result['date'] = pd.to_datetime(result['timestamp'], unit='ms')
+        elif 'date' not in result.columns and 'time' in result.columns:
+            result['date'] = pd.to_datetime(result['time'])
+        
+        # Ensure date is in datetime format
+        if 'date' in result.columns and not pd.api.types.is_datetime64_any_dtype(result['date']):
+            result['date'] = pd.to_datetime(result['date'])
         
         # Merge each on-chain DataFrame
         for source, df in onchain_dfs.items():
             if df.empty:
                 continue
-                
-            # Ensure the on-chain data has a date column
-            if 'date' not in df.columns and 'timestamp' in df.columns:
-                df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
+            
+            # Make a copy to avoid modifying the original
+            df_copy = df.copy()
+            
+            # Determine which column to use for date joining
+            date_column = None
+            
+            # Check for date columns in order of preference
+            if 'date' in df_copy.columns:
+                date_column = 'date'
+            elif 'datetime' in df_copy.columns:
+                df_copy['date'] = pd.to_datetime(df_copy['datetime'])
+                date_column = 'date'
+            elif 'timestamp' in df_copy.columns:
+                df_copy['date'] = pd.to_datetime(df_copy['timestamp'], unit='ms')
+                date_column = 'date'
+            elif 'start_time' in df_copy.columns:
+                df_copy['date'] = pd.to_datetime(df_copy['start_time'], unit='ms')
+                date_column = 'date'
+            elif 'time' in df_copy.columns:
+                df_copy['date'] = pd.to_datetime(df_copy['time'])
+                date_column = 'date'
+            else:
+                print(f"Skipping {source}: No date/timestamp/time/datetime column found")
+                continue
+            
+            # Ensure date is in datetime format
+            if not pd.api.types.is_datetime64_any_dtype(df_copy[date_column]):
+                df_copy[date_column] = pd.to_datetime(df_copy[date_column])
+            
+            # Print a sample of dates to debug
+            print(f"  {source} date samples: {df_copy[date_column].iloc[:3].tolist()}")
+            print(f"  Result date samples: {result['date'].iloc[:3].tolist()}")
             
             # Rename columns to avoid conflicts
             rename_cols = {}
-            for col in df.columns:
-                if col not in ['date', 'timestamp']:
+            for col in df_copy.columns:
+                if col not in ['date']:
                     rename_cols[col] = f"{source}_{col}"
             
-            df_renamed = df.rename(columns=rename_cols)
+            df_renamed = df_copy.rename(columns=rename_cols)
             
-            # Merge on date
-            result = pd.merge(result, df_renamed, on='date', how='left')
+            try:
+                # Merge on date
+                result = pd.merge(result, df_renamed, on='date', how='left')
+                print(f"  Successfully merged {source} data")
+            except Exception as e:
+                print(f"  Error merging {source} data: {str(e)}")
         
         # Fill NaN values created by the merge
-        result.fillna(method='ffill', inplace=True)
-        result.fillna(0, inplace=True)
+        numeric_cols = [col for col in result.columns if pd.api.types.is_numeric_dtype(result[col])]
+        if numeric_cols:
+            # Handle null or infinite values
+            result[numeric_cols] = result[numeric_cols].replace([np.inf, -np.inf], np.nan)
+            result[numeric_cols] = result[numeric_cols].fillna(method='ffill').fillna(method='bfill').fillna(0)
         
         return result
     
@@ -325,34 +392,60 @@ class FeatureEngineer:
     
     def process_data(self, price_df, onchain_dfs=None, add_indicators=True, add_custom=True):
         """
-        Process data by adding features and normalizing.
+        Complete data processing pipeline.
         
         Args:
             price_df (pd.DataFrame): DataFrame with price data
-            onchain_dfs (dict, optional): Dictionary of DataFrames with on-chain data
+            onchain_dfs (dict): Dictionary of DataFrames with on-chain data
             add_indicators (bool): Whether to add technical indicators
             add_custom (bool): Whether to add custom features
             
         Returns:
-            pd.DataFrame: Processed DataFrame with all features
+            pd.DataFrame: Processed DataFrame
         """
         result = price_df.copy()
         
-        # Add technical indicators
+        # Step 1: Add technical indicators
         if add_indicators:
             result = self.add_technical_indicators(result)
         
-        # Add custom features
+        # Step 2: Add custom features
         if add_custom:
             result = self.add_custom_features(result)
-        
-        # Add on-chain features if provided
-        if onchain_dfs is not None:
+            
+        # Step 3: Add on-chain features if provided
+        if onchain_dfs is not None and len(onchain_dfs) > 0:
             result = self.add_on_chain_features(result, onchain_dfs)
         
-        # Normalize features
+        # Step 4: Handle outliers
+        result = self.handle_outliers(result)
+        
+        # Step 5: Normalize features if requested
         if self.normalize:
-            result = self.normalize_features(result)
+            # Make sure to drop non-numeric columns before normalizing
+            date_cols = [col for col in result.columns if 'date' in col.lower() or 'time' in col.lower()]
+            numeric_cols = [col for col in result.columns if col not in date_cols and pd.api.types.is_numeric_dtype(result[col])]
+            
+            if numeric_cols:
+                # Replace inf values and handle NaN before normalization
+                result[numeric_cols] = result[numeric_cols].replace([np.inf, -np.inf], np.nan)
+                result[numeric_cols] = result[numeric_cols].fillna(method='ffill').fillna(method='bfill').fillna(0)
+                
+                # Store non-numeric columns
+                non_numeric = result[date_cols].copy()
+                
+                # Normalize numeric columns
+                normalized = self.normalize_features(result[numeric_cols])
+                
+                # Combine back with non-numeric columns
+                result = pd.concat([non_numeric, normalized], axis=1)
+        
+        # Print a message before returning so we can confirm the key columns are present
+        if 'price_change_1d' in result.columns and 'volatility_7d' in result.columns:
+            print("Successfully created required features for HMM model.")
+        else:
+            print("Warning: Required features for HMM model not created.")
+            print(f"Available columns: {result.columns.tolist()}")
         
         return result
     
@@ -389,114 +482,99 @@ class FeatureEngineer:
     
     def load_and_process_data(self, crypto, start_date=None, end_date=None):
         """
-        Load and process all available data for a specific cryptocurrency.
+        Load and process data for a cryptocurrency.
         
         Args:
             crypto (str): Cryptocurrency symbol (e.g., 'BTC')
-            start_date (str): Optional start date filter in YYYY-MM-DD format
-            end_date (str): Optional end date filter in YYYY-MM-DD format
+            start_date (str): Start date for filtering
+            end_date (str): End date for filtering
             
         Returns:
             pd.DataFrame: Processed DataFrame with all features
         """
         try:
-            # Check for CCXT/market data first (default format)
-            price_files = [f for f in os.listdir(DATA_DIR) if f.startswith(f"{crypto}_ccxt_market") and f.endswith('.csv')]
+            # Find price data files for this crypto
+            price_files = [f for f in os.listdir(DATA_DIR) if f.startswith(crypto) and ('market_data' in f or 'price' in f) and f.endswith('.csv')]
             
-            if price_files:
-                price_file = os.path.join(DATA_DIR, price_files[0])
-                price_df = pd.read_csv(price_file)
-                print(f"Using price data from {price_file}")
-            else:
-                # Try to find any price data
-                glassnode_files = [f for f in os.listdir(DATA_DIR) if f.startswith(f"{crypto}_glassnode_market_price") and f.endswith('.csv')]
-                if glassnode_files:
-                    price_file = os.path.join(DATA_DIR, glassnode_files[0])
-                    price_df = pd.read_csv(price_file)
-                    
-                    # Rename value to price for consistency if needed
-                    if 'value' in price_df.columns and 'price' not in price_df.columns:
-                        price_df = price_df.rename(columns={'value': 'price'})
-                        
-                    print(f"Using Glassnode price data from {price_file}")
-                else:
-                    print(f"No price data found for {crypto}")
-                    return pd.DataFrame()
+            if not price_files:
+                print(f"No price data files found for {crypto}. Please make sure data is downloaded.")
+                return pd.DataFrame()
             
-            # Ensure date column is in datetime format
-            if 'date' in price_df.columns:
-                price_df['date'] = pd.to_datetime(price_df['date'])
-            elif 'timestamp' in price_df.columns:
+            # Use the most recent or most appropriate file
+            price_file = sorted(price_files)[-1]  # Sort alphabetically and take the last one
+            price_path = os.path.join(DATA_DIR, price_file)
+            print(f"Using price data from {price_path}")
+            
+            # Load price data
+            price_df = pd.read_csv(price_path)
+            
+            # Convert timestamp to datetime if needed
+            if 'timestamp' in price_df.columns and 'date' not in price_df.columns:
                 price_df['date'] = pd.to_datetime(price_df['timestamp'], unit='ms')
+            elif 'time' in price_df.columns and 'date' not in price_df.columns:
+                price_df['date'] = pd.to_datetime(price_df['time'])
             
-            # Apply date filters if provided
+            # Ensure date column is always in datetime format
+            if 'date' in price_df.columns and not pd.api.types.is_datetime64_any_dtype(price_df['date']):
+                price_df['date'] = pd.to_datetime(price_df['date'])
+            
+            # Filter by date if provided
             if start_date:
                 start_date = pd.to_datetime(start_date)
                 price_df = price_df[price_df['date'] >= start_date]
-            
             if end_date:
                 end_date = pd.to_datetime(end_date)
                 price_df = price_df[price_df['date'] <= end_date]
             
-            if price_df.empty:
-                print(f"No data found for {crypto} in the specified date range")
-                return pd.DataFrame()
+            # Ensure OHLCV columns or at least a price column
+            if 'close' not in price_df.columns and 'price' not in price_df.columns:
+                if all(col in price_df.columns for col in ['open', 'high', 'low']):
+                    # If we have most OHLC columns but no close, we can use the last available price
+                    price_df['close'] = price_df['open'].shift(-1)  # Use next open as this period's close
+                    price_df.fillna(method='ffill', inplace=True)
+                elif 'value' in price_df.columns:
+                    # Some datasets use 'value' for price
+                    price_df['price'] = price_df['value']
+                else:
+                    print(f"Warning: No price data found in {price_file}. Please check the data format.")
             
-            # Look for on-chain data files
+            # Look for on-chain data
             print(f"Looking for on-chain data for {crypto}...")
-            onchain_files = [f for f in os.listdir(DATA_DIR) if f.startswith(f"{crypto}_") and f.endswith('.csv') and not f.startswith(f"{crypto}_ccxt")]
-            
             onchain_dfs = {}
+            onchain_files = [f for f in os.listdir(DATA_DIR) if (f.startswith(crypto) or ('_' + crypto.lower() + '_' in f)) and f != price_file and f.endswith('.csv')]
+            
             for file in onchain_files:
-                # Extract source and feature from filename
-                parts = file.split('_', 2)
-                if len(parts) < 3:
-                    continue
-                
-                source = parts[1]
-                feature = parts[2].replace('.csv', '')
-                
                 try:
                     file_path = os.path.join(DATA_DIR, file)
+                    # Extract dataset name from filename
+                    dataset_name = file.replace(crypto + '_', '').replace('.csv', '')
+                    
+                    # Load data
                     df = pd.read_csv(file_path)
                     
-                    # Ensure date column is in datetime format
-                    if 'date' in df.columns:
+                    # Convert date columns to datetime
+                    if 'date' in df.columns and not pd.api.types.is_datetime64_any_dtype(df['date']):
                         df['date'] = pd.to_datetime(df['date'])
-                    elif 'timestamp' in df.columns:
+                    elif 'timestamp' in df.columns and 'date' not in df.columns:
                         df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    elif 'time' in df.columns and 'date' not in df.columns:
+                        df['date'] = pd.to_datetime(df['time'])
                     
-                    # Apply date filters
-                    if start_date:
-                        df = df[df['date'] >= start_date]
-                    if end_date:
-                        df = df[df['date'] <= end_date]
-                    
-                    # Skip empty dataframes
-                    if df.empty:
-                        continue
-                    
-                    key = f"{source}_{feature}"
-                    onchain_dfs[key] = df
-                    print(f"  Loaded {key} with {len(df)} rows")
+                    # Only include non-empty dataframes
+                    if not df.empty:
+                        onchain_dfs[dataset_name] = df
+                        print(f"  Loaded {dataset_name} with {len(df)} rows")
                 except Exception as e:
                     print(f"  Error loading {file}: {str(e)}")
             
-            # Process the data
             print(f"Processing {len(onchain_dfs)} on-chain datasets for {crypto}")
-            processed_df = self.process_data(price_df, onchain_dfs)
             
-            # Handle outliers to improve model stability
-            processed_df = self.handle_outliers(processed_df, method='winsorize', threshold=3.0)
+            # Process all data
+            processed_data = self.process_data(price_df, onchain_dfs, add_indicators=True, add_custom=True)
             
-            # Sort by date for time-series analysis
-            if 'date' in processed_df.columns:
-                processed_df = processed_df.sort_values('date')
-            
-            return processed_df
-            
+            return processed_data
         except Exception as e:
-            print(f"Error in load_and_process_data: {str(e)}")
+            print(f"Error processing data: {str(e)}")
             import traceback
             traceback.print_exc()
             return pd.DataFrame()
