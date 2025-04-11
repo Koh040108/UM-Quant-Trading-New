@@ -20,7 +20,7 @@ from src.feature_engineering import FeatureEngineer
 from src.hmm_model import MarketHMM
 from src.visualization import create_performance_dashboard
 
-def ensure_price_data_exists(crypto='BTC', interval='4h', start_date=None, end_date=None):
+def ensure_price_data_exists(crypto='BTC', interval='1h', start_date=None, end_date=None):
     """Ensure price data exists, create if not."""
     # Use default dates if not provided
     if end_date is None:
@@ -44,8 +44,8 @@ def ensure_price_data_exists(crypto='BTC', interval='4h', start_date=None, end_d
         # Generate date range based on interval
         if interval == '1h':
             date_range = pd.date_range(start=start, end=end, freq='1H')
-        elif interval == '4h':
-            date_range = pd.date_range(start=start, end=end, freq='4H')
+        elif interval == '1h':
+            date_range = pd.date_range(start=start, end=end, freq='1H')
         else:  # Default to daily
             date_range = pd.date_range(start=start, end=end, freq='D')
         
@@ -79,13 +79,13 @@ def ensure_price_data_exists(crypto='BTC', interval='4h', start_date=None, end_d
     else:
         print(f"Using existing price data: {ccxt_path}")
 
-def run_hmm_model(crypto='BTC', interval='4h', states=7, threshold=0.005, train_split=0.7):
+def run_hmm_model(crypto='BTC', interval='1h', states=7, threshold=0.005, train_split=0.7):
     """
     Run the HMM model using available data with a proper train-test split.
     
     Args:
         crypto (str): Cryptocurrency to analyze
-        interval (str): Data interval (e.g., '4h')
+        interval (str): Data interval (e.g., '1h')
         states (int): Number of HMM states
         threshold (float): Return threshold for trading signals
         train_split (float): Proportion of data to use for training (0.7 = 70%)
@@ -309,7 +309,7 @@ if __name__ == "__main__":
     # Run the model with 70% training, 30% testing split
     run_hmm_model(
         crypto='BTC', 
-        interval='4h', 
+        interval=1h', 
         states=7,
         threshold=0.005,  # Default threshold, will be optimized
         train_split=0.7   # 70% training, 30% testing

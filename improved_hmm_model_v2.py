@@ -26,7 +26,7 @@ from src.feature_engineering import FeatureEngineer
 from src.hmm_model import MarketHMM
 from src.visualization import create_performance_dashboard
 
-def load_and_prepare_data(crypto='BTC', interval='4h'):
+def load_and_prepare_data(crypto='BTC', interval='1h'):
     """
     Load and prepare data with enhanced features focusing on:
     1. Moving Averages (OHLC)
@@ -591,7 +591,7 @@ def generate_advanced_signals(df, hmm_model, threshold=0.0, risk_factor=0.5):
     
     return signals
 
-def run_improved_model_v2(crypto='BTC', interval='4h'):
+def run_improved_model_v2(crypto='BTC', interval='1h'):
     """
     Run improved HMM model v2 with better utilization of:
     1. Moving Averages (OHLC)
@@ -714,4 +714,4 @@ if __name__ == "__main__":
     print("2. Price Volatility")
     print("3. Whale Activity Spikes")
     print("4. Exchange Net Flow Rate Changes")
-    run_improved_model_v2(crypto='BTC', interval='4h') 
+    run_improved_model_v2(crypto='BTC', interval='1h') 

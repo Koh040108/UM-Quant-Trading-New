@@ -38,6 +38,18 @@ async def fetch_data_async(topic, start_date, end_date, api_key=None):
     start_time = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_time = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     
+    # Calculate date differences to determine appropriate limit
+    days_difference = (end_time - start_time).days
+    
+    # For hourly data, we need 24 records per day (adjust based on topic)
+    if 'hour' in topic:
+        # Set limit to at least the number of hours in the date range
+        limit = max(days_difference * 24, 1000)
+        print(f"Setting limit to {limit} to ensure coverage of {days_difference} days of hourly data")
+    else:
+        # For daily data, we need more records for multi-year data
+        limit = max(days_difference * 2, 1000)
+    
     try:
         print(f"Fetching data for topic: {topic}")
         
@@ -47,7 +59,7 @@ async def fetch_data_async(topic, start_date, end_date, api_key=None):
             data = await cybotrade_datasource.query_paginated(
                 api_key=api_key,
                 topic=topic,
-                limit=100  # Small limit for initial test
+                limit=limit  # Use the calculated limit
             )
             
             if not data and start_time and end_time:
@@ -58,7 +70,7 @@ async def fetch_data_async(topic, start_date, end_date, api_key=None):
                     topic=topic,
                     start_time=start_time,
                     end_time=end_time,
-                    limit=1000
+                    limit=limit
                 )
         except Exception as inner_e:
             print(f"  Error with query: {str(inner_e)}")
@@ -91,7 +103,7 @@ async def fetch_data_async(topic, start_date, end_date, api_key=None):
                 data = await cybotrade_datasource.query_paginated(
                     api_key=api_key,
                     topic=simple_topic,
-                    limit=100
+                    limit=limit
                 )
             except Exception as final_e:
                 print(f"  Final error: {str(final_e)}")
@@ -197,7 +209,7 @@ async def fetch_and_save_data_async(crypto, start_date, end_date, interval, api_
     topics = [
         # Price data is most critical
         f"cryptoquant|btc/inter-entity-flows/miner-to-miner?from_miner=f2pool&to_miner=all_miner&window=hour",
-        f"cryptoquant|btc/fund-data/market-price-usd?symbol=gbtc&window=day",
+        f"cryptoquant|btc/market-data/price-ohlcv?window=day",
         f"cryptoquant|btc/flow-indicator/exchange-whale-ratio?exchange=binance&window=hour",
         f"cryptoquant|btc/exchange-flows/inflow?exchange=binance&window=hour",
         f"cryptoquant|btc/exchange-flows/outflow?exchange=binance&window=hour",
@@ -293,7 +305,7 @@ def fetch_all_data(cryptos=None, start_date=None, end_date=None, interval=DEFAUL
     ))
 
 async def create_price_data_if_missing(crypto, start_date, end_date, interval):
-    """Create basic price data if none was fetched from API."""
+    """Check if price data exists, but don't create synthetic data if missing."""
     # Check if we already have price data
     market_price_filename = f"{crypto}_market_price_{interval}.csv"
     market_price_path = os.path.join(DATA_DIR, market_price_filename)
@@ -302,51 +314,11 @@ async def create_price_data_if_missing(crypto, start_date, end_date, interval):
     ccxt_path = os.path.join(DATA_DIR, ccxt_filename)
     
     if not os.path.exists(market_price_path) and not os.path.exists(ccxt_path):
-        print(f"No price data found for {crypto}. Creating synthetic price data for basic functionality.")
-        
-        # Parse dates
-        start = pd.to_datetime(start_date)
-        end = pd.to_datetime(end_date)
-        
-        # Generate date range based on interval
-        if interval == '1h':
-            date_range = pd.date_range(start=start, end=end, freq='1h')
-        elif interval == '4h':
-            date_range = pd.date_range(start=start, end=end, freq='4h')
-        else:  # Default to daily
-            date_range = pd.date_range(start=start, end=end, freq='D')
-        
-        # Generate simple random walk prices
-        np.random.seed(42)
-        n_steps = len(date_range)
-        price_changes = np.random.normal(0.0001, 0.01, n_steps)
-        prices = 100 * (1 + np.cumsum(price_changes))
-        volumes = prices * np.random.lognormal(0, 0.5, n_steps)
-        
-        # Create and save dataframe
-        df = pd.DataFrame({
-            'date': date_range,
-            'price': prices,
-            'volume': volumes
-        })
-        
-        # Save in standard market price format 
-        df.to_csv(market_price_path, index=False)
-        print(f"Created basic price data with {len(df)} records: {market_price_path}")
-        
-        # Also save in ccxt format for compatibility
-        df.to_csv(ccxt_path, index=False)
-        print(f"Created ccxt-compatible price data: {ccxt_path}")
-        
-        # Also save in glassnode format
-        glassnode_df = df[['date', 'price']].rename(columns={'price': 'value'})
-        glassnode_path = os.path.join(DATA_DIR, f"{crypto}_glassnode_market_price_usd_close.csv")
-        glassnode_df.to_csv(glassnode_path, index=False)
-        print(f"Created glassnode price data: {glassnode_path}")
-        
-        return True
+        print(f"No price data found for {crypto}. Please make sure price data is available.")
+        print(f"Expected files: {market_price_path} or {ccxt_path}")
+        return False
     
-    return False
+    return True
 
 if __name__ == "__main__":
     # Example usage

@@ -39,6 +39,6 @@ if __name__ == "__main__":
     # Run the model with the fresh data
     print("\nRunning model with fresh data...")
     import improved_hmm_model_v2
-    improved_hmm_model_v2.run_improved_model_v2(crypto='BTC', interval='4h')
+    improved_hmm_model_v2.run_improved_model_v2(crypto='BTC', interval='1h')
     
     print("Process complete: All data deleted and fresh data fetched and processed.") 

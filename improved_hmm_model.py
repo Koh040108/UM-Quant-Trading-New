@@ -21,7 +21,7 @@ from src.feature_engineering import FeatureEngineer
 from src.hmm_model import MarketHMM
 from src.visualization import create_performance_dashboard
 
-def load_and_prepare_data(crypto='BTC', interval='4h'):
+def load_and_prepare_data(crypto='BTC', interval='1h'):
     """
     Load and prepare data with enhanced features for improved performance.
     
@@ -291,7 +291,7 @@ def generate_risk_managed_signals(df, hmm_model, threshold=0.0, risk_factor=0.5)
     
     return signals
 
-def run_improved_model(crypto='BTC', interval='4h'):
+def run_improved_model(crypto='BTC', interval='1h'):
     """
     Run improved HMM model with parameter optimization and enhanced risk management.
     """
@@ -406,4 +406,4 @@ def run_improved_model(crypto='BTC', interval='4h'):
 
 if __name__ == "__main__":
     print("Running improved HMM model with parameter optimization and risk management")
-    run_improved_model(crypto='BTC', interval='4h') 
+    run_improved_model(crypto='BTC', interval='1h') 

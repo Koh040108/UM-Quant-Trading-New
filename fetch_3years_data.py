@@ -40,7 +40,7 @@ def fetch_three_years_data():
     print(f"Fetching data for cryptocurrencies: {', '.join(CRYPTOCURRENCIES)}")
     
     # Use 4-hour intervals for a good balance of detail and performance
-    interval = DEFAULT_INTERVAL  # Using the default interval from config (usually '4h')
+    interval = DEFAULT_INTERVAL  # Using the default interval from config (usually '1h')
     
     fetch_all_data(
         cryptos=CRYPTOCURRENCIES,

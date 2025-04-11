@@ -22,6 +22,8 @@ from src.cybotrade_fetcher import fetch_all_data
 from src.feature_engineering import FeatureEngineer
 from src.hmm_model import MarketHMM
 from src.visualization import create_performance_dashboard
+from src.xgboost_model import XGBoostPredictor
+from src.hybrid_model import HybridTradingModel
 
 # Print API key status
 api_key = os.getenv("CYBOTRADE_API_KEY")
@@ -48,9 +50,9 @@ def parse_args():
                         help='End date in YYYY-MM-DD format')
     parser.add_argument('--cybotrade_api_key', type=str, default=None,
                         help='API key for Cybotrade (if not set in environment)')
-    parser.add_argument('--states', type=int, default=HMM_STATES,
+    parser.add_argument('--states', type=int, default=5,
                         help='Number of hidden states for HMM')
-    parser.add_argument('--threshold', type=float, default=0.0,
+    parser.add_argument('--threshold', type=float, default=0.0002,
                         help='Return threshold for profitable states')
     parser.add_argument('--load_model', type=str, default=None,
                         help='Path to pre-trained model to load')
@@ -62,6 +64,14 @@ def parse_args():
                         help='Do not refresh data (use existing files if available)')
     parser.add_argument('--no_shorts', action='store_true',
                         help='Disable short selling (only allow long positions)')
+    parser.add_argument('--use_regimes', action='store_true',
+                        help='Use market regime detection as a trading filter')
+    parser.add_argument('--regime_states', type=int, default=2,
+                        help='Number of market regimes to detect (default: 2)')
+    parser.add_argument('--model', type=str, default='hybrid', choices=['hmm', 'xgboost', 'hybrid'],
+                        help='Model to use for prediction')
+    parser.add_argument('--n_lags', type=int, default=2,
+                        help='Number of lag features for XGBoost (default: 2)')
     
     return parser.parse_args()
 
@@ -111,7 +121,11 @@ def prepare_data(args):
     
     # Set default dates if not provided
     if start_date is None:
-        start_date = (datetime.now() - timedelta(days=365*3)).strftime('%Y-%m-%d')  # 3 years of data
+        # Always get 3 years of data
+        end_date_obj = datetime.now() if end_date is None else datetime.strptime(end_date, '%Y-%m-%d')
+        start_date = (end_date_obj - timedelta(days=365*3)).strftime('%Y-%m-%d')
+        print(f"Setting start date to exactly 3 years before end date: {start_date}")
+    
     if end_date is None:
         end_date = datetime.now().strftime('%Y-%m-%d')
     
@@ -173,58 +187,120 @@ def prepare_data(args):
 
 def train_model(data, args):
     """Train the HMM model."""
+    # Split data into training and testing sets (2 years training, 1 year testing)
+    data = data.sort_values('date')
+    
+    # Calculate date ranges based on available data
+    data_min_date = data['date'].min()
+    data_max_date = data['date'].max()
+    actual_days = (data_max_date - data_min_date).days
+    
+    print(f"Total data span: {actual_days} days ({actual_days/365:.2f} years)")
+    
+    # If we have at least 2 years of data, use 2 years for training
+    # Otherwise use 2/3 of the available data
+    if actual_days >= 365*2:
+        train_end_date = data_min_date + pd.Timedelta(days=365*2)
+        print(f"Using exactly 2 years for training, 1 year for testing")
+    else:
+        train_end_date = data_min_date + pd.Timedelta(days=actual_days * 2/3)
+        print(f"Using {actual_days * 2/3:.0f} days for training (2/3 of available data)")
+    
+    train_data = data[data['date'] <= train_end_date]
+    test_data = data[data['date'] > train_end_date]
+    
+    print(f"Training data: {len(train_data)} rows from {train_data['date'].min()} to {train_data['date'].max()}")
+    print(f"Testing data: {len(test_data)} rows from {test_data['date'].min()} to {test_data['date'].max()}")
+    
+    # Create and train the selected model
+    model = None
+    
     if args.load_model:
         print(f"Loading pre-trained model from {args.load_model}")
-        hmm_model = MarketHMM()
-        hmm_model.load_model(args.load_model)
+        model = MarketHMM()
+        model.load_model(args.load_model)
     else:
-        # Split data into training and testing sets (2 years training, 1 year testing)
-        data = data.sort_values('date')
-        total_days = (data['date'].max() - data['date'].min()).days
-        train_end_date = data['date'].min() + pd.Timedelta(days=total_days * 2/3)  # 2/3 of data for training
+        if args.model == 'hmm':
+            print(f"Training new HMM model with {args.states} states")
+            model = MarketHMM(n_states=args.states)
+            model.fit(train_data)
+        elif args.model == 'xgboost':
+            print(f"Training new XGBoost model with {args.n_lags} lags")
+            model = XGBoostPredictor(n_lags=args.n_lags)
+            model.fit(train_data)
+        elif args.model == 'hybrid':
+            print(f"Training new Hybrid model with {args.states} HMM states and {args.n_lags} XGBoost lags")
+            model = HybridTradingModel(n_states=args.states, n_lags=args.n_lags)
+            model.fit(train_data)
+        else:
+            raise ValueError(f"Unknown model type: {args.model}")
         
-        train_data = data[data['date'] <= train_end_date]
-        test_data = data[data['date'] > train_end_date]
-        
-        print(f"Training data: {len(train_data)} rows from {train_data['date'].min()} to {train_data['date'].max()}")
-        print(f"Testing data: {len(test_data)} rows from {test_data['date'].min()} to {test_data['date'].max()}")
-        
-        print(f"Training new HMM model with {args.states} states")
-        hmm_model = MarketHMM(n_states=args.states)
-        hmm_model.fit(train_data)
-        
-        if args.save_model:
-            model_path = hmm_model.save_model()
+        if args.save_model and args.model == 'hmm':
+            model_path = model.save_model()
             print(f"Model saved to {model_path}")
     
-    return hmm_model, test_data
+    return model, test_data
 
 
-def run_backtest(hmm_model, data, args):
+def run_backtest(model, data, args):
     """Run backtest with the trained model."""
     print("Running backtest...")
     
-    # Add states to the data
-    with_states = hmm_model.add_states_to_df(data)
-    
     # Determine which price column to use
-    price_col = 'close'
+    price_col = 'price_usd_close' if 'price_usd_close' in data.columns else 'close'
     if 'price' in data.columns:
         price_col = 'price'
     elif 'value' in data.columns:
         price_col = 'value'
     
-    # Generate trading signals
-    signals = hmm_model.generate_trading_signals(with_states, threshold=args.threshold, price_col=price_col)
+    results = None
+    performance = None
     
-    # Backtest the strategy
-    allow_shorts = not args.no_shorts
-    results, performance = hmm_model.backtest_strategy(
-        signals, 
-        price_col=price_col, 
-        fee=TRADING_FEE,
-        allow_shorts=allow_shorts
-    )
+    # Generate signals based on model type
+    if args.model == 'hmm':
+        # Add states to the data
+        with_states = model.add_states_to_df(data)
+        
+        # Generate trading signals, using regime detection if specified
+        signals = model.generate_trading_signals(
+            with_states, 
+            threshold=args.threshold, 
+            price_col=price_col,
+            use_regimes=args.use_regimes
+        )
+        
+        # Backtest the strategy
+        allow_shorts = not args.no_shorts
+        results, performance = model.backtest_strategy(
+            signals, 
+            price_col=price_col, 
+            fee=TRADING_FEE,
+            allow_shorts=allow_shorts
+        )
+    elif args.model == 'xgboost':
+        # Generate predictions and signals
+        predictions = model.predict(data, price_col=price_col)
+        signals = model.generate_trading_signals(predictions)
+        
+        # Use the HMM backtesting logic
+        dummy_hmm = MarketHMM()
+        results, performance = dummy_hmm.backtest_strategy(
+            signals,
+            price_col=price_col,
+            fee=TRADING_FEE,
+            allow_shorts=not args.no_shorts
+        )
+    elif args.model == 'hybrid':
+        # Generate combined predictions
+        combined = model.predict(data, price_col=price_col, threshold=args.threshold)
+        
+        # Backtest with the hybrid model
+        results, performance = model.backtest_strategy(
+            combined,
+            price_col=price_col,
+            fee=TRADING_FEE,
+            allow_shorts=not args.no_shorts
+        )
     
     # Print performance
     print_performance(performance)
@@ -238,6 +314,12 @@ def run_backtest(hmm_model, data, args):
             crypto=args.crypto
         )
         print(f"Performance dashboard created in {dashboard_dir}")
+        
+        # Generate model-specific visualizations
+        if args.model == 'xgboost':
+            model.plot_predictions(results, price_col=price_col)
+        elif args.model == 'hybrid':
+            model.plot_signals(results, price_col=price_col)
     
     return results, performance
 
@@ -305,14 +387,14 @@ def main():
         return 1
     
     # Train model and get test data
-    hmm_model, test_data = train_model(data, args)
+    model, test_data = train_model(data, args)
     
-    if hmm_model is None:
+    if model is None:
         print("Error: Model training failed. Please check your data and parameters.")
         return 1
     
     # Run backtest on test data
-    results, performance = run_backtest(hmm_model, test_data, args)
+    results, performance = run_backtest(model, test_data, args)
     
     # Evaluate performance against criteria
     success = evaluate_performance(performance)
