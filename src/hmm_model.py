@@ -351,66 +351,99 @@ class MarketHMM:
         
         # If using regimes, we need to detect market regimes from returns
         if use_regimes:
-            from src.regime_detection import MarketRegimeDetector
-            
-            # Create and fit a regime detector on the returns
-            regime_detector = MarketRegimeDetector(n_regimes=2)
-            
-            # Clean returns data for regime detection (remove NaN, Inf values)
-            returns_series = pd.Series(result['returns'].values, index=result.index)
-            returns_series = returns_series.fillna(0).replace([np.inf, -np.inf], 0)
-            
-            # Train regime detector with clean data
-            regime_detector.train(returns_series)
-            
-            # Get regimes
-            regimes = regime_detector.predict_regimes(returns_series)
-            result['market_regime'] = regimes
-            
-            # Analyze regimes to identify favorable regime (usually 0 for bullish, 1 for bearish)
-            # but we should confirm this by looking at average returns
-            regime_returns = {}
-            for regime in range(2):
-                regime_returns[regime] = result.loc[result['market_regime'] == regime, 'returns'].mean()
-            
-            favorable_regime = max(regime_returns, key=regime_returns.get)
-            unfavorable_regime = min(regime_returns, key=regime_returns.get)
-            
-            print(f"\nMarket Regime Analysis:")
-            print(f"Favorable Regime: {favorable_regime} (Avg Return: {regime_returns[favorable_regime]:.4f})")
-            print(f"Unfavorable Regime: {unfavorable_regime} (Avg Return: {regime_returns[unfavorable_regime]:.4f})")
-            
-            # Define a function to map states to signals, considering both state and regime
-            def get_signal(row):
-                state = row['hmm_state']
-                regime = row['market_regime']
+            try:
+                from src.regime_detection import MarketRegimeDetector
                 
-                # More balanced approach: Use regime as a confirmation filter, but not as strict
-                if state == bullish_state and state_returns[state] > threshold:
-                    # Allow buy signals in favorable regime with full confidence
-                    if regime == favorable_regime:
-                        return 1  # Buy signal with high confidence
-                    else:
-                        # Still allow buy signals in unfavorable regime but with reduced frequency
-                        if abs(state_returns[state]) > 2 * threshold:  # Higher threshold for unfavorable regime
-                            return 1  # Buy signal with strong evidence
+                # Create and fit a regime detector on the returns
+                regime_detector = MarketRegimeDetector(n_regimes=2)
+                
+                # Use DF with price and returns for regime detection
+                regime_data = result.copy()
+                
+                # Train regime detector with the data
+                regime_detector.fit(regime_data, price_col=price_col)
+                
+                # Get regimes
+                regime_data = regime_detector.predict(regime_data, price_col=price_col)
+                
+                # Add regimes to result
+                result['market_regime'] = regime_data['regime']
+                
+                # Analyze regimes to identify favorable regime (usually 0 for bullish, 1 for bearish)
+                # but we should confirm this by looking at average returns
+                regime_returns = {}
+                for regime in result['market_regime'].unique():
+                    if pd.isna(regime):
+                        continue
+                    regime_returns[regime] = result.loc[result['market_regime'] == regime, 'returns'].mean()
+                
+                if regime_returns:
+                    favorable_regime = max(regime_returns, key=regime_returns.get)
+                    unfavorable_regime = min(regime_returns, key=regime_returns.get)
+                    
+                    print(f"\nMarket Regime Analysis:")
+                    print(f"Favorable Regime: {favorable_regime} (Avg Return: {regime_returns[favorable_regime]:.4f})")
+                    print(f"Unfavorable Regime: {unfavorable_regime} (Avg Return: {regime_returns[unfavorable_regime]:.4f})")
+                    
+                    # Define a function to map states to signals, considering both state and regime
+                    def get_signal(row):
+                        state = row['hmm_state']
+                        regime = row['market_regime']
+                        
+                        # More balanced approach: Use regime as a confirmation filter, but not as strict
+                        if state == bullish_state and state_returns[state] > threshold:
+                            # Allow buy signals in favorable regime with full confidence
+                            if regime == favorable_regime:
+                                return 1  # Buy signal with high confidence
+                            else:
+                                # Still allow buy signals in unfavorable regime but with reduced frequency
+                                if abs(state_returns[state]) > 2 * threshold:  # Higher threshold for unfavorable regime
+                                    return 1  # Buy signal with strong evidence
+                                else:
+                                    return 0  # Neutral
+                        # Only allow sell signals in unfavorable regime or strong bearish state
+                        elif state == bearish_state and state_returns[state] < -threshold:
+                            if regime == unfavorable_regime:
+                                return -1  # Sell signal with high confidence
+                            else:
+                                # Still allow sell signals in favorable regime but with reduced frequency
+                                if abs(state_returns[state]) > 2 * threshold:  # Higher threshold for favorable regime
+                                    return -1  # Sell signal with strong evidence
+                                else:
+                                    return 0  # Neutral
                         else:
                             return 0  # Neutral
-                # Only allow sell signals in unfavorable regime or strong bearish state
-                elif state == bearish_state and state_returns[state] < -threshold:
-                    if regime == unfavorable_regime:
-                        return -1  # Sell signal with high confidence
-                    else:
-                        # Still allow sell signals in favorable regime but with reduced frequency
-                        if abs(state_returns[state]) > 2 * threshold:  # Higher threshold for favorable regime
-                            return -1  # Sell signal with strong evidence
-                        else:
-                            return 0  # Neutral
+                
+                    # Apply the function to create signals
+                    result['signal'] = result.apply(get_signal, axis=1)
                 else:
-                    return 0  # Neutral
-            
-            # Apply the function to create signals
-            result['signal'] = result.apply(get_signal, axis=1)
+                    print("Warning: Could not analyze regimes. Using traditional signals instead.")
+                    # Fall back to traditional approach
+                    def get_signal(state):
+                        if state == bullish_state and state_returns[state] > threshold:
+                            return 1  # Buy signal
+                        elif state == bearish_state and state_returns[state] < -threshold:
+                            return -1  # Sell signal
+                        else:
+                            return 0  # Neutral
+                    
+                    # Apply the function to create signals
+                    result['signal'] = result['hmm_state'].apply(get_signal)
+            except Exception as e:
+                print(f"\nWarning: Regime detection failed with error: {str(e)}")
+                print("Falling back to traditional signal generation without regimes")
+                
+                # Traditional approach without regime filtering
+                def get_signal(state):
+                    if state == bullish_state and state_returns[state] > threshold:
+                        return 1  # Buy signal
+                    elif state == bearish_state and state_returns[state] < -threshold:
+                        return -1  # Sell signal
+                    else:
+                        return 0  # Neutral
+                
+                # Apply the function to create signals
+                result['signal'] = result['hmm_state'].apply(get_signal)
         else:
             # Traditional approach without regime filtering
             def get_signal(state):
