@@ -75,8 +75,8 @@ def parse_args():
                         help='Number of lag features for XGBoost (default: 2)')
     parser.add_argument('--window_size', type=int, default=30,
                         help='Window size for LSTM model (default: 30)')
-    parser.add_argument('--use_lstm', action='store_true',
-                        help='Include LSTM model in hybrid approach')
+    parser.add_argument('--no_lstm', action='store_true',
+                        help='Exclude LSTM model from hybrid approach')
     # Performance metric thresholds
     parser.add_argument('--min_sharpe', type=float, default=MIN_SHARPE_RATIO,
                         help=f'Minimum Sharpe ratio target (default: {MIN_SHARPE_RATIO})')
@@ -250,7 +250,7 @@ def train_model(data, args):
                 n_states=args.states, 
                 n_lags=args.n_lags,
                 window_size=args.window_size,
-                use_lstm=args.use_lstm
+                use_lstm=not args.no_lstm
             )
             model.fit(train_data)
         else:
