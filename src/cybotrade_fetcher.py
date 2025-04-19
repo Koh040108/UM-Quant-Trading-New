@@ -213,7 +213,10 @@ async def fetch_and_save_data_async(crypto, start_date, end_date, interval, api_
         f"cryptoquant|btc/flow-indicator/exchange-whale-ratio?exchange=binance&window=hour",
         f"cryptoquant|btc/exchange-flows/inflow?exchange=binance&window=hour",
         f"cryptoquant|btc/exchange-flows/outflow?exchange=binance&window=hour",
+        f"cryptoquant|btc/exchange-flows/netflow?exchange=binance&window=hour",
+
         # Try these as secondary data sources
+        #f"coinglass|hyperliquid/whale-position?interval=hour"
     ]
     
     success_count = 0

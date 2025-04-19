@@ -142,7 +142,7 @@ class MarketRegimeDetector:
         result.loc[regime_series.index, 'regime'] = regime_series
         
         # Forward fill regimes for any timestamps without predictions
-        result['regime'] = result['regime'].fillna(method='ffill')
+        result['regime'] = result['regime'].ffill()
         
         return result
     
@@ -329,3 +329,64 @@ class MarketRegimeDetector:
         self.window_size = saved_model['window_size']
         
         return self 
+
+
+def detect_market_regimes(df, price_col='close', n_regimes=2, method='gmm', features=None):
+    """
+    Detect market regimes from price data.
+    
+    This function is a wrapper around the MarketRegimeDetector class that handles
+    the common use case of detecting regimes in a single step.
+    
+    Args:
+        df (pd.DataFrame): DataFrame with price and features
+        price_col (str): Name of the price column
+        n_regimes (int): Number of regimes to detect
+        method (str): Method for regime detection ('gmm' or 'kmeans')
+        features (list): Features to use for regime detection
+        
+    Returns:
+        pd.DataFrame: DataFrame with regime column added
+    """
+    # Create detector
+    detector = MarketRegimeDetector(
+        n_regimes=n_regimes,
+        method=method,
+        features=features
+    )
+    
+    try:
+        # Fit and predict
+        detector.fit(df, price_col=price_col)
+        result = detector.predict(df, price_col=price_col)
+        
+        # Label regimes
+        regime_labels, regime_stats = detector.label_regimes(result, price_col=price_col)
+        
+        # Print regime statistics
+        print("\nMarket Regime Analysis:")
+        for regime, stats in regime_stats.items():
+            regime_type = regime_labels[regime]
+            mean_return = stats['mean_return']
+            std_return = stats['std_return']
+            count = stats['count']
+            
+            # Handle possible NaN values
+            if pd.isna(mean_return):
+                mean_return = 0.0
+            if pd.isna(std_return):
+                std_return = 0.0
+            
+            print(f"  Regime {regime} ({regime_type.capitalize()}): "
+                  f"Mean Return = {mean_return:.6f}, "
+                  f"Volatility = {std_return:.6f}, "
+                  f"Count = {count}")
+        
+        # Only return the DataFrame with regimes
+        return result
+    except Exception as e:
+        print(f"Error in regime detection: {str(e)}")
+        # Return original DataFrame with NaN regimes as fallback
+        df = df.copy()
+        df['regime'] = np.nan
+        return df 

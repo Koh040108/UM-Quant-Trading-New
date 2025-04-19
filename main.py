@@ -7,6 +7,7 @@ import argparse
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import traceback
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
@@ -39,7 +40,7 @@ print(f"To use existing data instead, run with the --no_refresh flag.\n")
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Crypto Trading Strategy with HMM')
+    parser = argparse.ArgumentParser(description='Crypto Trading Strategy with Multi-Model Approach')
     
     parser.add_argument('--crypto', type=str, default='BTC', choices=CRYPTOCURRENCIES,
                         help='Cryptocurrency to analyze')
@@ -51,9 +52,9 @@ def parse_args():
                         help='End date in YYYY-MM-DD format')
     parser.add_argument('--cybotrade_api_key', type=str, default=None,
                         help='API key for Cybotrade (if not set in environment)')
-    parser.add_argument('--states', type=int, default=5,
+    parser.add_argument('--states', type=int, default=7,
                         help='Number of hidden states for HMM')
-    parser.add_argument('--threshold', type=float, default=0.0002,
+    parser.add_argument('--threshold', type=float, default=0.0001,
                         help='Return threshold for profitable states')
     parser.add_argument('--load_model', type=str, default=None,
                         help='Path to pre-trained model to load')
@@ -70,13 +71,19 @@ def parse_args():
     parser.add_argument('--regime_states', type=int, default=2,
                         help='Number of market regimes to detect (default: 2)')
     parser.add_argument('--model', type=str, default='hybrid', choices=['hmm', 'xgboost', 'lstm', 'hybrid'],
-                        help='Model to use for prediction')
+                        help='Model to use for prediction: '
+                             'hmm (regime detection), '
+                             'xgboost (feature-based classification), '
+                             'lstm (sequential prediction), '
+                             'hybrid (combines all models)')
     parser.add_argument('--n_lags', type=int, default=2,
                         help='Number of lag features for XGBoost (default: 2)')
     parser.add_argument('--window_size', type=int, default=30,
                         help='Window size for LSTM model (default: 30)')
     parser.add_argument('--no_lstm', action='store_true',
                         help='Exclude LSTM model from hybrid approach')
+    parser.add_argument('--no_tuning', action='store_true',
+                        help='Skip parameter tuning to use default parameters')
     # Performance metric thresholds
     parser.add_argument('--min_sharpe', type=float, default=MIN_SHARPE_RATIO,
                         help=f'Minimum Sharpe ratio target (default: {MIN_SHARPE_RATIO})')
@@ -194,11 +201,19 @@ def prepare_data(args):
             
     except Exception as e:
         print(f"Error processing data: {str(e)}")
+        traceback.print_exc()
         return None
 
 
 def train_model(data, args):
-    """Train the HMM model."""
+    """Train the selected model architecture.
+    
+    This function trains one of the following models:
+    - HMM: For market regime detection
+    - XGBoost: For feature-based classification
+    - LSTM: For sequential pattern recognition
+    - Hybrid: Combining all three approaches
+    """
     # Split data into training and testing sets (2 years training, 1 year testing)
     data = data.sort_values('date')
     
@@ -229,60 +244,147 @@ def train_model(data, args):
     
     if args.load_model:
         print(f"Loading pre-trained model from {args.load_model}")
-        model = MarketHMM()
-        model.load_model(args.load_model)
-    else:
         if args.model == 'hmm':
-            print(f"Training new HMM model with {args.states} states")
-            model = MarketHMM(n_states=args.states)
-            model.fit(train_data)
-        elif args.model == 'xgboost':
-            print(f"Training new XGBoost model with {args.n_lags} lags")
-            model = XGBoostPredictor(n_lags=args.n_lags)
-            model.fit(train_data)
-        elif args.model == 'lstm':
-            print(f"Training new LSTM model with window size {args.window_size}")
-            model = LSTMPredictor(window_size=args.window_size)
-            model.fit(train_data)
+            model = MarketHMM()
+            model.load_model(args.load_model)
         elif args.model == 'hybrid':
-            print(f"Training new Hybrid model with {args.states} HMM states, {args.n_lags} XGBoost lags, and LSTM with window size {args.window_size}")
+            model = HybridTradingModel(
+                n_states=args.states,
+                n_lags=args.n_lags,
+                window_size=args.window_size,
+                use_lstm=not args.no_lstm
+            )
+            model.load_model(args.load_model)
+        elif args.model == 'lstm':
+            model = LSTMPredictor(window_size=args.window_size)
+            # LSTM requires input_dim which we need to estimate
+            estimated_input_dim = len(train_data.select_dtypes(include=['float64', 'int']).columns)
+            model.load_model(args.load_model, estimated_input_dim)
+        elif args.model == 'xgboost':
+            model = XGBoostPredictor(n_lags=args.n_lags)
+            # For XGBoost, we need to load differently
+            try:
+                model = joblib.load(args.load_model)
+                print(f"XGBoost model loaded successfully")
+            except Exception as e:
+                print(f"Error loading XGBoost model: {str(e)}")
+                return None, test_data
+    else:
+        print(f"\n{'='*50}")
+        print(f"Training new {args.model.upper()} model with selected configuration")
+        print(f"{'='*50}")
+        
+        if args.model == 'hmm':
+            print(f"\n🔍 HIDDEN MARKOV MODEL (HMM)")
+            print(f"Purpose: Market regime detection")
+            print(f"Strengths: Identifies underlying market states (bull, bear, sideways)")
+            print(f"Configuration: {args.states} hidden states")
+            
+            model = MarketHMM(n_states=args.states)
+            try:
+                model.fit(train_data)
+                print("✅ HMM model trained successfully")
+                
+                # Provide insights into the detected regimes
+                with_states = model.add_states_to_df(train_data)
+                state_analysis = model.analyze_states(with_states)
+                print("\nMarket Regime Analysis:")
+                for state in range(args.states):
+                    mean_return = state_analysis[('returns', 'mean')][state]
+                    volatility = state_analysis[('returns', 'std')][state]
+                    regime_type = "Bullish" if mean_return > 0.0005 else "Bearish" if mean_return < -0.0005 else "Sideways"
+                    print(f"  Regime {state}: {regime_type} (Return: {mean_return:.6f}, Volatility: {volatility:.6f})")
+            except Exception as e:
+                print(f"⚠️ Error training HMM model: {str(e)}")
+                traceback.print_exc()
+                return None, test_data
+                
+        elif args.model == 'xgboost':
+            print(f"\n🌲 XGBOOST MODEL")
+            print(f"Purpose: Feature-based classification")
+            print(f"Strengths: Handles tabular data, captures non-linear relationships, ranks feature importance")
+            print(f"Configuration: {args.n_lags} lag features")
+            
+            model = XGBoostPredictor(n_lags=args.n_lags)
+            try:
+                model.fit(train_data, no_tuning=args.no_tuning)
+                print("✅ XGBoost model trained successfully")
+            except Exception as e:
+                print(f"⚠️ Error training XGBoost model: {str(e)}")
+                traceback.print_exc()
+                return None, test_data
+                
+        elif args.model == 'lstm':
+            print(f"\n🧠 LSTM (LONG SHORT-TERM MEMORY) MODEL")
+            print(f"Purpose: Sequential pattern recognition")
+            print(f"Strengths: Captures temporal dependencies, learns complex patterns in time-series data")
+            print(f"Configuration: Window size {args.window_size}")
+            
+            model = LSTMPredictor(window_size=args.window_size)
+            try:
+                model.fit(train_data, no_tuning=args.no_tuning)
+                print("✅ LSTM model trained successfully")
+            except Exception as e:
+                print(f"⚠️ Error training LSTM model: {str(e)}")
+                traceback.print_exc()
+                return None, test_data
+                
+        elif args.model == 'hybrid':
+            print(f"\n🔄 HYBRID MODEL")
+            print(f"Purpose: Combine strengths of multiple modeling approaches")
+            print(f"Components:")
+            print(f"  1. HMM: Market regime detection ({args.states} states)")
+            print(f"  2. XGBoost: Feature-based classification ({args.n_lags} lags)")
+            if not args.no_lstm:
+                print(f"  3. LSTM: Sequential pattern recognition (window size {args.window_size})")
+            
             model = HybridTradingModel(
                 n_states=args.states, 
                 n_lags=args.n_lags,
                 window_size=args.window_size,
                 use_lstm=not args.no_lstm
             )
-            model.fit(train_data)
+            try:
+                model.fit(train_data, no_tuning=args.no_tuning)
+                print("✅ Hybrid model trained successfully")
+            except Exception as e:
+                print(f"⚠️ Error training Hybrid model: {str(e)}")
+                traceback.print_exc()
+                return None, test_data
         else:
             raise ValueError(f"Unknown model type: {args.model}")
         
         # Save model if requested
         if args.save_model:
-            if args.model == 'hmm':
-                model_path = model.save_model()
-                print(f"HMM model saved to {model_path}")
-            elif args.model == 'xgboost' and hasattr(model, 'save_model'):
-                model_path = model.save_model()
-                print(f"XGBoost model saved to {model_path}")
-            elif args.model == 'lstm' and hasattr(model, 'save_model'):
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                model_path = os.path.join(MODELS_DIR, f"lstm_model_{timestamp}.pt")
-                model.save_model(model_path)
-                print(f"LSTM model saved to {model_path}")
-            elif args.model == 'hybrid' and hasattr(model, 'save_model'):
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                model_path = os.path.join(MODELS_DIR, f"hybrid_model_{timestamp}")
-                model.save_model(model_path)
-                print(f"Hybrid model saved to {model_path}")
-            else:
-                print(f"Model saving not implemented for {args.model} model")
+            try:
+                if args.model == 'hmm':
+                    model_path = model.save_model()
+                    print(f"HMM model saved to {model_path}")
+                elif args.model == 'xgboost' and hasattr(model, 'save_model'):
+                    model_path = model.save_model()
+                    print(f"XGBoost model saved to {model_path}")
+                elif args.model == 'lstm' and hasattr(model, 'save_model'):
+                    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                    model_path = os.path.join(MODELS_DIR, f"lstm_model_{timestamp}.pt")
+                    model.save_model(model_path)
+                    print(f"LSTM model saved to {model_path}")
+                elif args.model == 'hybrid' and hasattr(model, 'save_model'):
+                    model_path = model.save_model()
+                    print(f"Hybrid model saved to {model_path}")
+                else:
+                    print(f"Model saving not implemented for {args.model} model")
+            except Exception as e:
+                print(f"Error saving model: {str(e)}")
+                traceback.print_exc()
     
     return model, test_data
 
 
 def run_backtest(model, data, args):
     """Run backtest with the trained model."""
-    print("Running backtest...")
+    print("\n" + "="*80)
+    print(f"RUNNING BACKTEST WITH {args.model.upper()} MODEL")
+    print("="*80)
     
     # Determine which price column to use
     price_cols = ['price_usd_close', 'close', 'price', 'value']
@@ -297,7 +399,8 @@ def run_backtest(model, data, args):
     
     if price_col is None:
         # If no standard price column is found, try to find any column with 'price' in the name
-        price_candidates = [col for col in data.columns if 'price' in col.lower()]
+        price_candidates = [col for col in data.columns if any(
+            price_str in col.lower() for price_str in ['price', 'close', 'value'])]
         if price_candidates:
             price_col = price_candidates[0]
             print(f"Using '{price_col}' as the price column")
@@ -314,91 +417,114 @@ def run_backtest(model, data, args):
     results = None
     performance = None
     
-    # Generate signals based on model type
-    if args.model == 'hmm':
-        # Add states to the data
-        with_states = model.add_states_to_df(data)
-        
-        # Generate trading signals, using regime detection if specified
-        signals = model.generate_trading_signals(
-            with_states, 
-            threshold=args.threshold, 
-            price_col=price_col,
-            use_regimes=args.use_regimes
-        )
-        
-        # Backtest the strategy
-        allow_shorts = not args.no_shorts
-        results, performance = model.backtest_strategy(
-            signals, 
-            price_col=price_col, 
-            fee=TRADING_FEE,
-            allow_shorts=allow_shorts
-        )
-    elif args.model == 'xgboost':
-        # Generate predictions and signals
-        predictions = model.predict(data, price_col=price_col)
-        signals = model.generate_trading_signals(predictions)
-        
-        # Use the HMM backtesting logic
-        dummy_hmm = MarketHMM()
-        results, performance = dummy_hmm.backtest_strategy(
-            signals,
-            price_col=price_col,
-            fee=TRADING_FEE,
-            allow_shorts=not args.no_shorts
-        )
-    elif args.model == 'lstm':
-        # Generate predictions and signals
-        predictions = model.predict(data, price_col=price_col)
-        signals = model.generate_trading_signals(predictions)
-        
-        # Use the HMM backtesting logic
-        dummy_hmm = MarketHMM()
-        results, performance = dummy_hmm.backtest_strategy(
-            signals,
-            price_col=price_col,
-            fee=TRADING_FEE,
-            allow_shorts=not args.no_shorts
-        )
-    elif args.model == 'hybrid':
-        # Generate combined predictions
-        combined = model.predict(data, price_col=price_col, threshold=args.threshold)
-        
-        # Backtest with the hybrid model
-        results, performance = model.backtest_strategy(
-            combined,
-            price_col=price_col,
-            fee=TRADING_FEE,
-            allow_shorts=not args.no_shorts
-        )
+    try:
+        # Generate signals based on model type
+        if args.model == 'hmm':
+            print("\nGenerating signals with HMM market regime detection...")
+            # Add states to the data
+            with_states = model.add_states_to_df(data)
+            
+            # Generate trading signals, using regime detection if specified
+            signals = model.generate_trading_signals(
+                with_states, 
+                threshold=args.threshold, 
+                price_col=price_col,
+                use_regimes=args.use_regimes
+            )
+            
+            # Backtest the strategy
+            allow_shorts = not args.no_shorts
+            results, performance = model.backtest_strategy(
+                signals, 
+                price_col=price_col, 
+                fee=TRADING_FEE,
+                allow_shorts=allow_shorts
+            )
+        elif args.model == 'xgboost':
+            print("\nGenerating signals with XGBoost feature-based classification...")
+            # Generate predictions and signals
+            predictions = model.predict(data, price_col=price_col)
+            signals = model.generate_trading_signals(predictions)
+            
+            # Use the HMM backtesting logic
+            dummy_hmm = MarketHMM()
+            results, performance = dummy_hmm.backtest_strategy(
+                signals,
+                price_col=price_col,
+                fee=TRADING_FEE,
+                allow_shorts=not args.no_shorts
+            )
+        elif args.model == 'lstm':
+            print("\nGenerating signals with LSTM sequential pattern recognition...")
+            # Generate predictions and signals
+            predictions = model.predict(data, price_col=price_col)
+            signals = model.generate_trading_signals(predictions)
+            
+            # Use the HMM backtesting logic
+            dummy_hmm = MarketHMM()
+            results, performance = dummy_hmm.backtest_strategy(
+                signals,
+                price_col=price_col,
+                fee=TRADING_FEE,
+                allow_shorts=not args.no_shorts
+            )
+        elif args.model == 'hybrid':
+            print("\nGenerating signals with Hybrid multi-model approach...")
+            # Generate combined predictions
+            combined = model.predict(data, price_col=price_col, threshold=args.threshold)
+            
+            # Backtest with the hybrid model
+            results, performance = model.backtest_strategy(
+                combined,
+                price_col=price_col,
+                fee=TRADING_FEE,
+                allow_shorts=not args.no_shorts
+            )
+    except Exception as e:
+        print(f"Error during backtesting: {str(e)}")
+        traceback.print_exc()
+        return None, None
     
     # Print performance
     print_performance(performance)
     
     # Generate visualizations unless skipped
     if not args.skip_plots:
-        print("\nGenerating performance visualizations...")
-        dashboard_dir = create_performance_dashboard(
-            results=results,
-            performance=performance,
-            crypto=args.crypto
-        )
-        print(f"Performance dashboard created in {dashboard_dir}")
-        
-        # Generate model-specific visualizations
-        if args.model == 'xgboost':
-            model.plot_predictions(results, price_col=price_col)
-        elif args.model == 'lstm':
-            model.plot_predictions(results, price_col=price_col)
-        elif args.model == 'hybrid':
-            model.plot_signals(results, price_col=price_col)
+        try:
+            print("\nGenerating performance visualizations...")
+            dashboard_dir = create_performance_dashboard(
+                results=results,
+                performance=performance,
+                crypto=args.crypto
+            )
+            print(f"Performance dashboard created in {dashboard_dir}")
+            
+            # Generate model-specific visualizations
+            if args.model == 'xgboost':
+                model.plot_predictions(results, price_col=price_col)
+                plt.savefig(os.path.join(RESULTS_DIR, f"{args.crypto}_xgboost_predictions.png"))
+                plt.close()
+            elif args.model == 'lstm':
+                model.plot_predictions(results, price_col=price_col)
+                plt.savefig(os.path.join(RESULTS_DIR, f"{args.crypto}_lstm_predictions.png"))
+                plt.close()
+            elif args.model == 'hybrid':
+                model.plot_signals(results, price_col=price_col)
+                plt.savefig(os.path.join(RESULTS_DIR, f"{args.crypto}_hybrid_signals.png"))
+                plt.close()
+        except Exception as e:
+            print(f"Error generating visualizations: {str(e)}")
+            traceback.print_exc()
     
     return results, performance
 
 
 def evaluate_performance(performance, args):
     """Evaluate if the strategy meets performance criteria."""
+    if performance is None:
+        print("No performance data available for evaluation.")
+        return False
+        
     sharpe_ratio = performance['Sharpe Ratio']
     max_drawdown = performance['Max Drawdown']
     trading_frequency = performance['Trading Frequency']
@@ -408,10 +534,14 @@ def evaluate_performance(performance, args):
     max_drawdown_limit = args.max_drawdown
     min_trade_freq_target = args.min_trade_freq
     
-    print("\nPerformance Evaluation:")
-    print(f"Sharpe Ratio: {sharpe_ratio:.4f} (Target ≥ {min_sharpe_target})")
-    print(f"Max Drawdown: {max_drawdown:.4f} (Target > {max_drawdown_limit})")
-    print(f"Trading Frequency: {trading_frequency:.4f} (Target ≥ {min_trade_freq_target})")
+    print("\n" + "="*80)
+    print("PERFORMANCE EVALUATION")
+    print("="*80)
+    
+    print(f"\nKey Metrics:")
+    print(f"  Sharpe Ratio: {sharpe_ratio:.4f} (Target ≥ {min_sharpe_target})")
+    print(f"  Max Drawdown: {max_drawdown:.4f} (Target > {max_drawdown_limit})")
+    print(f"  Trading Frequency: {trading_frequency:.4f} (Target ≥ {min_trade_freq_target})")
     
     meets_criteria = (
         sharpe_ratio >= min_sharpe_target and
@@ -432,27 +562,90 @@ def evaluate_performance(performance, args):
             print(f"  - Trading Frequency is below target ({trading_frequency:.4f} < {min_trade_freq_target})")
     
     # Compare to buy-and-hold
-    print("\nComparison to Buy & Hold:")
-    print(f"Strategy Total Return: {performance['Total Return']:.4f}")
-    print(f"Buy & Hold Total Return: {performance['Buy Hold Return']:.4f}")
-    print(f"Strategy Sharpe: {performance['Sharpe Ratio']:.4f}")
-    print(f"Buy & Hold Sharpe: {performance['Buy Hold Sharpe']:.4f}")
+    print("\nStrategy vs. Buy & Hold:")
+    print(f"  Strategy Total Return: {performance['Total Return']:.4f}x  ({performance['Total Return']*100:.2f}%)")
+    print(f"  Buy & Hold Return: {performance['Buy Hold Return']:.4f}x  ({performance['Buy Hold Return']*100:.2f}%)")
+    print(f"  Strategy Annual Return: {performance['Annual Return']:.4f}  ({performance['Annual Return']*100:.2f}%)")
+    print(f"  Buy & Hold Annual Return: {performance['Buy Hold Annual']:.4f}  ({performance['Buy Hold Annual']*100:.2f}%)")
+    print(f"  Strategy Sharpe: {performance['Sharpe Ratio']:.4f}")
+    print(f"  Buy & Hold Sharpe: {performance['Buy Hold Sharpe']:.4f}")
+    print(f"  Strategy Max Drawdown: {performance['Max Drawdown']:.4f}")
+    print(f"  Buy & Hold Max Drawdown: {performance['Buy Hold Max Drawdown']:.4f}")
+    
+    # Outperformance relative to buy-and-hold
+    outperformance = performance['Total Return'] - performance['Buy Hold Return']
+    if outperformance > 0:
+        print(f"\n📈 Strategy outperformed Buy & Hold by {outperformance:.4f}x ({outperformance*100:.2f}%)")
+    else:
+        print(f"\n📉 Strategy underperformed Buy & Hold by {-outperformance:.4f}x ({-outperformance*100:.2f}%)")
     
     return meets_criteria
 
 
 def print_performance(performance):
     """Print detailed performance metrics."""
+    if performance is None:
+        print("No performance data available.")
+        return
+        
     print("\nDetailed Performance Metrics:")
     
-    for metric, value in performance.items():
-        print(f"{metric}: {value:.4f}")
+    metrics_to_display = [
+        ('Total Return', 'Total strategy return (multiplicative)'),
+        ('Annual Return', 'Annualized return'),
+        ('Annual Volatility', 'Annualized standard deviation of returns'),
+        ('Sharpe Ratio', 'Risk-adjusted return (Annual Return / Annual Volatility)'),
+        ('Max Drawdown', 'Maximum peak-to-trough decline'),
+        ('Win Rate', 'Percentage of winning trades'),
+        ('Profit Factor', 'Gross profits divided by gross losses'),
+        ('Trading Frequency', 'Percentage of days with trades'),
+        ('Number of Trades', 'Total number of trades executed'),
+        ('Average Trade', 'Average percentage return per trade'),
+        ('Buy Hold Return', 'Total buy-and-hold return (multiplicative)'),
+        ('Buy Hold Sharpe', 'Risk-adjusted return for buy-and-hold'),
+        ('Buy Hold Max Drawdown', 'Maximum drawdown for buy-and-hold')
+    ]
+    
+    # Calculate max metric name length for alignment
+    max_name_len = max(len(name) for name, _ in metrics_to_display)
+    
+    # Print metrics
+    print("\n" + "-"*80)
+    for metric_name, description in metrics_to_display:
+        if metric_name in performance:
+            value = performance[metric_name]
+            # Format differently based on metric type
+            if 'Rate' in metric_name or metric_name in ['Annual Return', 'Annual Volatility']:
+                formatted_value = f"{value:.4f} ({value*100:.2f}%)"
+            elif 'Number' in metric_name:
+                formatted_value = f"{int(value)}"
+            else:
+                formatted_value = f"{value:.4f}"
+                
+            print(f"{metric_name.ljust(max_name_len)} : {formatted_value}")
+            print(f"{' ' * max_name_len}   {description}")
+            print("-"*80)
 
 
 def main():
     """Main function."""
+    print("\n" + "="*80)
+    print("CRYPTOCURRENCY TRADING STRATEGY WITH MULTI-MODEL APPROACH")
+    print("="*80)
+    
     # Parse arguments
     args = parse_args()
+    
+    print(f"\nModel Selection: {args.model.upper()}")
+    if args.model == 'hmm':
+        print("  HMM: Market regime detection to identify bull, bear, or sideways markets")
+    elif args.model == 'xgboost':
+        print("  XGBoost: Tree-based model for classification using engineered features")
+    elif args.model == 'lstm':
+        print("  LSTM: Recurrent neural network to capture temporal patterns in price data")
+    elif args.model == 'hybrid':
+        print("  Hybrid: Multi-model approach combining regime detection, feature-based")
+        print("          classification, and temporal pattern recognition")
     
     # Setup directories
     setup_directories()
@@ -464,33 +657,44 @@ def main():
         print("Error: No data available for processing. Please check data sources.")
         return 1
     
-    # Train model and get test data
-    model, test_data = train_model(data, args)
-    
-    if model is None:
-        print("Error: Model training failed. Please check your data and parameters.")
+    try:
+        # Train model and get test data
+        model, test_data = train_model(data, args)
+        
+        if model is None:
+            print("Error: Model training failed. Please check your data and parameters.")
+            return 1
+        
+        # Run backtest on test data
+        results, performance = run_backtest(model, test_data, args)
+        
+        if results is None or performance is None:
+            print("Error: Backtesting failed. Please check the model and data.")
+            return 1
+        
+        # Evaluate performance against criteria
+        success = evaluate_performance(performance, args)
+        
+        # Save results
+        if not args.skip_plots and results is not None:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            results_file = os.path.join(RESULTS_DIR, f"{args.crypto}_results_{timestamp}.csv")
+            results.to_csv(results_file, index=False)
+            print(f"Results saved to {results_file}")
+        
+        return 0 if success else 1
+        
+    except Exception as e:
+        print(f"Error during execution: {str(e)}")
+        traceback.print_exc()
         return 1
-    
-    # Run backtest on test data
-    results, performance = run_backtest(model, test_data, args)
-    
-    # Evaluate performance against criteria
-    success = evaluate_performance(performance, args)
-    
-    # Save results
-    if not args.skip_plots:
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        results_file = os.path.join(RESULTS_DIR, f"{args.crypto}_results_{timestamp}.csv")
-        results.to_csv(results_file, index=False)
-        print(f"Results saved to {results_file}")
-    
-    return 0 if success else 1
 
 
 if __name__ == "__main__":
     try:
-        main()
+        exit_code = main()
+        print(f"\nExecution completed with exit code: {exit_code}")
     except Exception as e:
-        print(f"Error: {str(e)}")
-        import traceback
-        traceback.print_exc() 
+        print(f"Unexpected error: {str(e)}")
+        traceback.print_exc()
+        exit(1) 
