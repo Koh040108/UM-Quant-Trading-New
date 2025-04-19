@@ -19,7 +19,7 @@ class HybridTradingModel:
         """
         Initialize the hybrid model.
         
-        Args:
+        Args: 
             n_states (int): Number of HMM states
             n_lags (int): Number of lag features for XGBoost
             window_size (int): Size of the lookback window for LSTM
