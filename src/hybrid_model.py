@@ -27,7 +27,8 @@ class HybridTradingModel:
     4. Ensemble mechanism combines outputs for final trading decisions
     """
     
-    def __init__(self, n_states=5, n_lags=2, window_size=30, use_lstm=True, random_state=42):
+    def __init__(self, n_states=5, n_lags=2, window_size=30, use_lstm=True, 
+                 random_state=42, hmm_weight=0.20, xgb_weight=0.40, lstm_weight=0.40):
         """
         Initialize the hybrid model.
         
@@ -37,6 +38,9 @@ class HybridTradingModel:
             window_size (int): Size of the lookback window for LSTM
             use_lstm (bool): Whether to use LSTM model
             random_state (int): Random seed for reproducibility
+            hmm_weight (float): Weight for HMM model in ensemble
+            xgb_weight (float): Weight for XGBoost model in ensemble
+            lstm_weight (float): Weight for LSTM model in ensemble
         """
         self.n_states = n_states
         self.n_lags = n_lags
@@ -65,11 +69,11 @@ class HybridTradingModel:
             self.lstm_model = None
             self.lstm_available = False
         
-        # Model weights for ensemble (will be calibrated during training)
+        # Model weights for ensemble (use provided weights or defaults)
         self.model_weights = {
-            'hmm': 0.30,
-            'xgb': 0.40,
-            'lstm': 0.30 if (use_lstm and self.lstm_available) else 0.0
+            'hmm': hmm_weight,
+            'xgb': xgb_weight,
+            'lstm': lstm_weight if (use_lstm and self.lstm_available) else 0.0
         }
         
         # If LSTM is not available, redistribute weights
@@ -77,6 +81,12 @@ class HybridTradingModel:
             total = self.model_weights['hmm'] + self.model_weights['xgb']
             self.model_weights['hmm'] = self.model_weights['hmm'] / total
             self.model_weights['xgb'] = self.model_weights['xgb'] / total
+        
+        # Ensure weights sum to 1.0
+        total_weight = sum(self.model_weights.values())
+        if total_weight != 1.0:
+            for key in self.model_weights:
+                self.model_weights[key] /= total_weight
         
         # Tracking variables
         self.is_trained = False
@@ -144,9 +154,17 @@ class HybridTradingModel:
                 print(f"Error training LSTM model: {str(e)}")
                 print("LSTM will not be used in the hybrid model")
         
-        # Step 5: Calibrate model weights
-        print("\nStep 5: Calibrating model weights...")
-        self._calibrate_weights(df_with_regimes, price_col)
+        # Adjust model weights if LSTM is not available
+        if not self.lstm_available and self.model_weights['lstm'] > 0:
+            print("LSTM model not available. Redistributing weights...")
+            # Redistribute LSTM weight proportionally to other models
+            lstm_weight = self.model_weights['lstm']
+            self.model_weights['lstm'] = 0.0
+            
+            hmm_xgb_total = self.model_weights['hmm'] + self.model_weights['xgb']
+            if hmm_xgb_total > 0:
+                self.model_weights['hmm'] += (self.model_weights['hmm'] / hmm_xgb_total) * lstm_weight
+                self.model_weights['xgb'] += (self.model_weights['xgb'] / hmm_xgb_total) * lstm_weight
         
         self.is_trained = True
         print("\n✅ Hybrid model training complete!")
@@ -156,75 +174,18 @@ class HybridTradingModel:
         
     def _calibrate_weights(self, df, price_col='close'):
         """
-        Calibrate the weights of each model based on their individual performance.
+        Uses previously provided weights without changing them.
+        This method is kept for backward compatibility but doesn't modify
+        the weights provided during initialization.
         
         Args:
             df (pd.DataFrame): DataFrame with price data
             price_col (str): Name of the price column
         """
-        # Use detected price column if available
-        if hasattr(self, 'detected_price_col'):
-            price_col = self.detected_price_col
-            
-        # Get individual model predictions for a validation period
-        val_size = min(int(len(df) * 0.3), 100)  # Use last 30% up to max 100 days
-        val_df = df.iloc[-val_size:]
-        
-        try:
-            # Get HMM predictions
-            try:
-                hmm_data = self.hmm_model.add_states_to_df(val_df)
-                hmm_signals = self.hmm_model.generate_trading_signals(hmm_data, price_col=price_col)
-                hmm_weight = 0.2  # Lower HMM weight since it's less responsive
-            except Exception as e:
-                print(f"Error getting HMM signals for calibration: {str(e)}")
-                hmm_weight = 0.1  # Reduce weight further if there was an error
-            
-            # Get XGBoost predictions
-            try:
-                xgb_data = self.xgb_model.predict(val_df, price_col=price_col)
-                xgb_weight = 0.4  # Keep XGBoost weight
-            except Exception as e:
-                print(f"Error getting XGBoost predictions for calibration: {str(e)}")
-                xgb_weight = 0.3  # Reduce weight if there was an error
-            
-            # Initialize LSTM weight
-            lstm_weight = 0.0  # Default to 0 if LSTM not available
-            
-            # Adjust weights if LSTM is available
-            if self.use_lstm and self.lstm_available:
-                try:
-                    # Try to get LSTM predictions
-                    lstm_data = self.lstm_model.predict(val_df, price_col=price_col)
-                    if 'lstm_pred' in lstm_data.columns and not lstm_data['lstm_pred'].isna().all():
-                        lstm_weight = 0.4  # Increase LSTM weight for better signal quality
-                    else:
-                        lstm_weight = 0.0
-                except Exception as e:
-                    print(f"Error getting LSTM predictions for calibration: {str(e)}")
-                    lstm_weight = 0.0
-                
-            # Normalize weights to sum to 1
-            total_weight = hmm_weight + xgb_weight + lstm_weight
-            self.model_weights = {
-                'hmm': hmm_weight / total_weight,
-                'xgb': xgb_weight / total_weight,
-                'lstm': lstm_weight / total_weight
-            }
-        except Exception as e:
-            print(f"Error calibrating weights: {str(e)}")
-            # Fallback to default weights
-            self.model_weights = {
-                'hmm': 0.20,
-                'xgb': 0.40, 
-                'lstm': 0.40 if (self.use_lstm and self.lstm_available) else 0.0
-            }
-            
-            # Renormalize if LSTM is not available
-            if not (self.use_lstm and self.lstm_available):
-                total = self.model_weights['hmm'] + self.model_weights['xgb']
-                self.model_weights['hmm'] /= total
-                self.model_weights['xgb'] /= total
+        # Since we now accept weights during initialization, 
+        # this function doesn't need to do anything.
+        # We keep it for backward compatibility.
+        pass
     
     def predict(self, df, price_col='close', threshold=0.0):
         """

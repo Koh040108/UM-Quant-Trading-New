@@ -9,7 +9,7 @@ MODELS_DIR = "models"
 
 # Trading parameters
 TRADING_FEE = 0.0006  # 0.06%
-MIN_TRADE_FREQUENCY = 0.03  # 3% of data rows
+MIN_TRADE_FREQUENCY = 0.12  # 3% of data rows
 
 # Model parameters
 HMM_STATES = 5  # Number of hidden states for HMM

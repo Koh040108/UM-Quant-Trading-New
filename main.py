@@ -52,9 +52,9 @@ def parse_args():
                         help='End date in YYYY-MM-DD format')
     parser.add_argument('--cybotrade_api_key', type=str, default=None,
                         help='API key for Cybotrade (if not set in environment)')
-    parser.add_argument('--states', type=int, default=7,
+    parser.add_argument('--states', type=int, default=2,
                         help='Number of hidden states for HMM')
-    parser.add_argument('--threshold', type=float, default=0.0001,
+    parser.add_argument('--threshold', type=float, default=0.001,
                         help='Return threshold for profitable states')
     parser.add_argument('--load_model', type=str, default=None,
                         help='Path to pre-trained model to load')
@@ -64,9 +64,9 @@ def parse_args():
                         help='Skip plotting results')
     parser.add_argument('--no_refresh', action='store_true',
                         help='Do not refresh data (use existing files if available)')
-    parser.add_argument('--no_shorts', action='store_true',
+    parser.add_argument('--no_shorts', action='store_true', default=True,
                         help='Disable short selling (only allow long positions)')
-    parser.add_argument('--use_regimes', action='store_true',
+    parser.add_argument('--use_regimes', action='store_true', default=True,
                         help='Use market regime detection as a trading filter')
     parser.add_argument('--regime_states', type=int, default=2,
                         help='Number of market regimes to detect (default: 2)')
@@ -78,19 +78,26 @@ def parse_args():
                              'hybrid (combines all models)')
     parser.add_argument('--n_lags', type=int, default=2,
                         help='Number of lag features for XGBoost (default: 2)')
-    parser.add_argument('--window_size', type=int, default=30,
-                        help='Window size for LSTM model (default: 30)')
+    parser.add_argument('--window_size', type=int, default=10,
+                        help='Window size for LSTM model (default: 8)')
     parser.add_argument('--no_lstm', action='store_true',
                         help='Exclude LSTM model from hybrid approach')
-    parser.add_argument('--no_tuning', action='store_true',
+    parser.add_argument('--no_tuning', action='store_true', default=True,
                         help='Skip parameter tuning to use default parameters')
+    # Model weights for hybrid model
+    parser.add_argument('--hmm_weight', type=float, default=0.15,
+                        help='Weight for HMM model in hybrid approach (default: 0.15)')
+    parser.add_argument('--xgb_weight', type=float, default=0.65,
+                        help='Weight for XGBoost model in hybrid approach (default: 0.65)')
+    parser.add_argument('--lstm_weight', type=float, default=0.20,
+                        help='Weight for LSTM model in hybrid approach (default: 0.20)')
     # Performance metric thresholds
     parser.add_argument('--min_sharpe', type=float, default=MIN_SHARPE_RATIO,
                         help=f'Minimum Sharpe ratio target (default: {MIN_SHARPE_RATIO})')
     parser.add_argument('--max_drawdown', type=float, default=MAX_DRAWDOWN_LIMIT,
                         help=f'Maximum drawdown limit as negative percentage (default: {MAX_DRAWDOWN_LIMIT})')
-    parser.add_argument('--min_trade_freq', type=float, default=MIN_TRADE_FREQUENCY,
-                        help=f'Minimum trading frequency target (default: {MIN_TRADE_FREQUENCY})')
+    parser.add_argument('--min_trade_freq', type=float, default=0.12,
+                        help=f'Minimum trading frequency target (default: 0.10)')
     
     return parser.parse_args()
 
@@ -337,12 +344,16 @@ def train_model(data, args):
             print(f"  2. XGBoost: Feature-based classification ({args.n_lags} lags)")
             if not args.no_lstm:
                 print(f"  3. LSTM: Sequential pattern recognition (window size {args.window_size})")
+            print(f"Model weights: HMM: {args.hmm_weight}, XGBoost: {args.xgb_weight}, LSTM: {args.lstm_weight}")
             
             model = HybridTradingModel(
                 n_states=args.states, 
                 n_lags=args.n_lags,
                 window_size=args.window_size,
-                use_lstm=not args.no_lstm
+                use_lstm=not args.no_lstm,
+                hmm_weight=args.hmm_weight,
+                xgb_weight=args.xgb_weight,
+                lstm_weight=args.lstm_weight
             )
             try:
                 model.fit(train_data, no_tuning=args.no_tuning)
